@@ -1,0 +1,2 @@
+# Preserve the canonical Core bytes (including existing CRLF) in these mirrors.
+*.wit -text whitespace=cr-at-eol
