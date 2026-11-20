@@ -7,7 +7,7 @@ comptime {
 }
 
 pub fn build(b: *std.Build) void {
-    const tests = b.step("test", "Run native canonical ABI memory tests (default)");
+    const tests = b.step("test", "Run native canonical ABI memory and layout tests (default)");
     b.default_step = tests;
     const memory_tests = b.addTest(.{
         .root_source_file = b.path("shared/abi_memory.zig"),
@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     tests.dependOn(&b.addRunArtifact(memory_tests).step);
+    const layout_tests = b.addTest(.{
+        .root_source_file = b.path("coding_abi/layout.zig"),
+        .target = b.host,
+        .optimize = .Debug,
+    });
+    tests.dependOn(&b.addRunArtifact(layout_tests).step);
 
     const abi = freestanding(b, "abi-memory", b.path("shared/wasm_abi.zig"));
     abi.root_module.export_symbol_names = &.{"cabi_realloc"};
@@ -37,7 +43,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const component = b.step("component", "Build a validated Coding Component from an explicit real guest source");
-    const guest_source = b.option([]const u8, "coding-guest", "Real Coding guest Zig entry point; none is shipped in A1");
+    const guest_source = b.option([]const u8, "coding-guest", "Real Coding guest Zig entry point");
     if (guest_source) |source| {
         if (core == null) {
             component.makeFn = requireCore;
@@ -63,9 +69,7 @@ fn freestanding(b: *std.Build, name: []const u8, source: std.Build.LazyPath) *st
 
 fn addCodingComponent(b: *std.Build, component: *std.Build.Step, check: *std.Build.Step, source: std.Build.LazyPath) void {
     const wasm = freestanding(b, "coding", source);
-    wasm.root_module.addImport("wasm_abi", b.createModule(.{ .root_source_file = b.path("shared/wasm_abi.zig") }));
-    // Require the Agent 0.8 entry points; componentization checks their core signatures.
-    wasm.root_module.export_symbol_names = &.{ "cabi_realloc", "init", "describe", "invoke", "drive" };
+    addCodingAbi(b, wasm);
 
     // Zig 0.13 hashes a directory argument's path, not its contents. Make a
     // content-addressed WIT input tree so any changed mirror invalidates embed.
@@ -97,6 +101,18 @@ fn addCodingComponent(b: *std.Build, component: *std.Build.Step, check: *std.Bui
     output.step.dependOn(&validate.step);
     output.step.dependOn(&extract.step);
     component.dependOn(&output.step);
+}
+
+fn addCodingAbi(b: *std.Build, wasm: *std.Build.Step.Compile) void {
+    const memory = b.createModule(.{ .root_source_file = b.path("shared/wasm_abi.zig") });
+    const coding = b.createModule(.{ .root_source_file = b.path("coding_abi/root.zig") });
+    coding.addImport("wasm_abi", memory);
+    wasm.root_module.addImport("wasm_abi", memory);
+    wasm.root_module.addImport("coding_abi", coding);
+    wasm.root_module.export_symbol_names = &.{
+        "cabi_realloc",   "init",               "describe",         "invoke",          "drive",
+        "cabi_post_init", "cabi_post_describe", "cabi_post_invoke", "cabi_post_drive",
+    };
 }
 
 fn requireCore(step: *std.Build.Step, _: std.Progress.Node) !void {
