@@ -11,8 +11,9 @@ Use `abi.host.<interface>.<method>(scratch, ...)`. Z2 uses `text_read.read`,
 uses `file_mutation.preflight` and `.mutate`. Z4 uses `filesystem.stat`,
 `.openRead`, `.read`, `.close`, `shell.launch`, `.read`, `.drain`, `.write`,
 `process.status`, `.waitForState`, `.release`, `.killTree`, and `abi.execution`.
-Arguments after the allocator match WIT, with `openRead` fixing the read-only
-flag. No adapter selects a shell or grants a Host operation. Results including
+Host discovery uses `abi.host.hostInfo(scratch)`. Arguments after the allocator
+match WIT, with `openRead` fixing the read-only flag. No adapter selects a shell
+or grants a Host operation. Results including
 error messages are copied into `scratch`; pass an arena scoped to the callback.
 For native tool tests, inject a mock at the tool's adapter boundary instead of
 introducing native effects into the guest binding.
@@ -32,7 +33,9 @@ pub fn drive(scratch: std.mem.Allocator, output: abi.types.BorrowedBuffer, state
 Treat callback parameters as call-scoped. Input copies must not be stored across
 calls; use the WIT continuation state for data that survives. Returned strings
 and lists may borrow call inputs, use `scratch`, or refer to constants; the
-binding copies return data before reclaiming the call arena.
+binding copies return data before reclaiming the call arena. Do not return
+slices backed by a local array or a runtime-built array literal; that stack
+storage is gone before lowering begins.
 
 `execution.create` gives the callback an `OwnedBuffer`. Borrow it with
 `buffer.borrow()` for operations. Use `buffer.take()` exactly once to transfer

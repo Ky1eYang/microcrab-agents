@@ -25,13 +25,15 @@ pub fn describe(_: Scratch, info: []const u8) types.DescribeResult {
 pub fn invoke(scratch: Scratch, info: []const u8, name: []const u8, args: []const u8) types.InvokeResult {
     if (std.mem.eql(u8, name, "buffer")) return runBuffer(scratch, info, args);
     if (std.mem.eql(u8, name, "host")) return runHost(scratch, args);
+    if (std.mem.eql(u8, name, "bulk")) return runBulk(scratch, args);
+    const attachments = scratch.dupe(types.MediaAttachment, &.{
+        .{ .media_type = "image/png", .data = args },
+        .{ .media_type = "image/gif", .data = "\x00\xff" },
+    }) catch @trap();
     return .{ .ok = .{ .final = .{
         .content = info,
         .failure = .{ .kind = .timeout, .code = "probe", .message = name, .retryable = true },
-        .attachments = &.{ .{ .media_type = "image/png", .data = args }, .{
-            .media_type = "image/gif",
-            .data = "\x00\xff",
-        } },
+        .attachments = attachments,
     } } };
 }
 
@@ -146,6 +148,22 @@ fn runHost(scratch: Scratch, path: []const u8) types.InvokeResult {
     }
     verify(host.process.release(scratch, process));
     return .{ .ok = .{ .final = .{ .content = read.content } } };
+}
+
+fn runBulk(scratch: Scratch, path: []const u8) types.InvokeResult {
+    const result = verify(host.glob.glob(scratch, .{
+        .root = path,
+        .pattern = "*",
+        .include_hidden = false,
+        .include_ignored = false,
+        .include_directories = false,
+        .max_results = 4096,
+    }));
+    check(result.entries.len == 4096 and !result.truncated);
+    for (result.entries) |entry| {
+        check(entry.kind == .file and std.mem.eql(u8, entry.path, "entry.txt"));
+    }
+    return .{ .ok = .{ .final = .{ .content = result.entries[4095].path } } };
 }
 
 fn verify(result: anytype) std.meta.FieldType(@TypeOf(result), .ok) {

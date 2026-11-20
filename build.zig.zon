@@ -5,7 +5,10 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "coding_abi",
+        "docs",
         "shared",
+        "tests",
         "tools",
         "wit",
         "README.md",

@@ -1,61 +1,48 @@
 # MicroCrab Agents
 
-A1 is the independent Zig build foundation, **not a working Zig Coding agent**.
-Core still builds and supplies the existing Rust Coding and Universal components.
-This repository is not registered in the superproject and does not stage or
-publish runtime artifacts. Existing Sessions retain their exact component pins.
+This workspace contains the Zig 0.13.0 Coding ABI and its verification fixtures.
+It does **not** select a Zig Coding agent. Core still supplies the existing Rust
+Coding and Universal components by default. Existing Sessions retain their exact
+component pins. Nothing here stages or publishes runtime artifacts.
 
 ## Local verification
 
-Use **Zig 0.13.0**. `zig build` defaults to the native memory tests; the additional
-checks require Node.js or `wasm-tools` on `PATH` as noted below.
+Use **Zig 0.13.0**. Formatting, native tests and core Wasm smoke tests:
 
 ```sh
-zig build test                                  # native allocator tests
-zig build test-wasm                             # core Wasm allocator smoke test (Node.js)
-zig build check-wit -Dcore=/path/to/microcrab-core # byte drift + WIT parsing (bash, wasm-tools)
+zig fmt --check build.zig build.zig.zon shared coding_abi tests
+zig build test                                    # Native memory/layout tests; default
+zig build test-wasm                               # Core Wasm allocator smoke (Node.js)
+zig build check-wit -Dcore=/path/to/microcrab-core  # bash + wasm-tools
+zig build test-coding-abi -Dcore=/path/to/microcrab-core # Node.js + wasm-tools
 ```
 
 The [Coding world](wit/world.wit), [Agent ABI 0.8](wit/deps/agent/agent.wit) and
 [Host ABI](wit/deps/host/host.wit) are byte-for-byte mirrors, not new contract
-sources. [The drift check](tools/check-wit.sh) compares them with the supplied
-Core checkout and never rewrites either repository.
+sources. The [drift check](tools/check-wit.sh) never rewrites either repository.
+`test-coding-abi` compiles a [test-only probe](tests/abi_probe.zig), checks wire
+values and ownership in a [Node.js witness](tools/test-coding-abi.mjs), and links
+and validates a real component against the Coding world. Test outputs remain in
+Zig's build cache and are not installable products. The Node fixture is not a
+substitute for Runtime/Host parity tests.
 
-The [allocator helper](shared/abi_memory.zig) tests owned-memory allocation,
-reallocation, and release independently of Wasm. The [Wasm boundary](shared/wasm_abi.zig)
-exports `cabi_realloc`, traps on failure, and uses the freestanding allocator.
-The Wasm test instantiates a core module with no imports and exactly `memory`
-and `cabi_realloc` exported. It does not exercise the Agent ABI or produce a
-Coding Component.
+## Supplying a real guest
 
-## Component pipeline and parity gates
-
-Once a real guest exists, it can be passed to the explicit packaging target:
+See the [port handoff](docs/zig-coding-abi.md) for the `coding_abi` module,
+callback signatures and ownership rules. An explicit guest can be built with:
 
 ```sh
 zig build component -Dcore=/path/to/microcrab-core -Dcoding-guest=path/to/guest.zig
 ```
 
 The [build](build.zig) compiles an entryless `wasm32-freestanding` core module
-in `ReleaseSmall`. A guest can import `wasm_abi` (for example,
-`comptime { _ = @import("wasm_abi"); }`) and must implement the actual Agent 0.8
-exports: `init`, `describe`, `invoke`, and `drive`. After a passing drift check,
-`wasm-tools` embeds the `coding` world with UTF-8 strings, composes the component,
-then validates and extracts its WIT before copying the build output to
-`zig-out/coding.component.wasm` (or the explicit Zig build prefix). This is not
-runtime installation. A1 supplies no guest source, substitute exports, or fake
-worker. Without a guest, `component` fails explicitly.
+in `ReleaseSmall`. `wasm-tools` embeds the Coding world with UTF-8 strings,
+composes it, validates it, extracts its WIT, and checks world conformance before
+copying it to `zig-out/coding.component.wasm` (or the explicit Zig build prefix).
+This is a build output, not runtime selection, installation or staging.
 
-1. **Bindings and lifecycle:** implement and exercise all four canonical entry
-   points in Core's runtime. Verify layout, result lifting, post-return frees,
-   and owned/borrowed handles separately from guest behavior.
-2. **Sandbox adapter parity:** compare capability-shaped catalogs and modes,
-   empty-capability behavior, typed attachments and failures, buffered output
-   and continuation/cancellation/cleanup with Rust Coding in controlled Host
-   fixtures. Core and the Host remain the authorization and lifecycle owners;
-   the Zig guest must not add new authority or behavior.
-3. **Integration after parity (A2):** separately verify explicit catalog
-   selection in the actual Host, a representative tool-driven turn and failure,
-   Rust Universal as a control, and pinned historical component resolution
-   (including concrete failure for missing bytes). Only then consider default
-   build dispatch changes. Component validation alone does not establish parity.
+Before promotion, verify the real guest in Core with constrained Host adapters,
+then compare it against Rust Coding through actual Server catalog selection and
+fixture-driven turns. Include cancellation, uncertain/partial mutations,
+attachment and buffer cleanup, pinned historical component resolution, and Rust
+Universal as a control. Default promotion requires a separate decision.

@@ -8,7 +8,10 @@ comptime {
         @compileError("the canonical ABI boundary requires wasm32-freestanding");
 }
 
-pub const allocator = std.heap.page_allocator;
+// Canonical list<record> results allocate each string independently. Zig's
+// page allocator spends a full Wasm page on each short string, exceeding the
+// Core memory budget on otherwise valid glob/grep results. Recycle small slots.
+pub const allocator = std.heap.wasm_allocator;
 
 /// The Canonical ABI expects a trap on allocation failure, not a null address.
 pub export fn cabi_realloc(old: ?[*]u8, old_size: usize, alignment: usize, new_size: usize) usize {

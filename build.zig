@@ -42,6 +42,20 @@ pub fn build(b: *std.Build) void {
         check.makeFn = requireCore;
     }
 
+    const probe = freestanding(b, "coding-abi-probe", b.path("tests/abi_probe.zig"));
+    addCodingAbi(b, probe);
+    const wire = b.addSystemCommand(&.{"node"});
+    wire.addFileArg(b.path("tools/test-coding-abi.mjs"));
+    wire.addFileArg(probe.getEmittedBin());
+    const probe_step = b.step("test-coding-abi", "Test Coding wire values and validate a test-only component");
+    probe_step.dependOn(&wire.step);
+    if (core != null) {
+        const packaging = addCodingComponent(b, check, probe);
+        probe_step.dependOn(packaging.verified);
+    } else {
+        probe_step.dependOn(check);
+    }
+
     const component = b.step("component", "Build a validated Coding Component from an explicit real guest source");
     const guest_source = b.option([]const u8, "coding-guest", "Real Coding guest Zig entry point");
     if (guest_source) |source| {
@@ -49,7 +63,13 @@ pub fn build(b: *std.Build) void {
             component.makeFn = requireCore;
             return;
         }
-        addCodingComponent(b, component, check, .{ .cwd_relative = source });
+        const wasm = freestanding(b, "coding", .{ .cwd_relative = source });
+        addCodingAbi(b, wasm);
+        const packaging = addCodingComponent(b, check, wasm);
+        // Explicit build output only; never selected by the default or install step.
+        const output = b.addInstallFile(packaging.artifact, "coding.component.wasm");
+        output.step.dependOn(packaging.verified);
+        component.dependOn(&output.step);
     } else {
         component.makeFn = requireGuest;
     }
@@ -67,10 +87,12 @@ fn freestanding(b: *std.Build, name: []const u8, source: std.Build.LazyPath) *st
     return wasm;
 }
 
-fn addCodingComponent(b: *std.Build, component: *std.Build.Step, check: *std.Build.Step, source: std.Build.LazyPath) void {
-    const wasm = freestanding(b, "coding", source);
-    addCodingAbi(b, wasm);
+const ComponentBuild = struct {
+    artifact: std.Build.LazyPath,
+    verified: *std.Build.Step,
+};
 
+fn addCodingComponent(b: *std.Build, check: *std.Build.Step, wasm: *std.Build.Step.Compile) ComponentBuild {
     // Zig 0.13 hashes a directory argument's path, not its contents. Make a
     // content-addressed WIT input tree so any changed mirror invalidates embed.
     const wit = b.addWriteFiles();
@@ -96,11 +118,13 @@ fn addCodingComponent(b: *std.Build, component: *std.Build.Step, check: *std.Bui
     extract.addArg("-o");
     _ = extract.addOutputFileArg("coding.component.wit");
 
-    // Explicit build output only; never selected by the default or install step.
-    const output = b.addInstallFile(artifact, "coding.component.wasm");
-    output.step.dependOn(&validate.step);
-    output.step.dependOn(&extract.step);
-    component.dependOn(&output.step);
+    const targets = b.addSystemCommand(&.{ "wasm-tools", "component", "targets" });
+    targets.addDirectoryArg(wit.getDirectory());
+    targets.addArgs(&.{ "--world", "microcrab:coding/coding@0.1.0" });
+    targets.addFileArg(artifact);
+    targets.step.dependOn(&validate.step);
+    targets.step.dependOn(&extract.step);
+    return .{ .artifact = artifact, .verified = &targets.step };
 }
 
 fn addCodingAbi(b: *std.Build, wasm: *std.Build.Step.Compile) void {
@@ -120,5 +144,5 @@ fn requireCore(step: *std.Build.Step, _: std.Progress.Node) !void {
 }
 
 fn requireGuest(step: *std.Build.Step, _: std.Progress.Node) !void {
-    return step.fail("A1 does not ship a Coding guest; component requires -Dcoding-guest=PATH and -Dcore=PATH", .{});
+    return step.fail("component requires a real -Dcoding-guest=PATH and -Dcore=PATH", .{});
 }
