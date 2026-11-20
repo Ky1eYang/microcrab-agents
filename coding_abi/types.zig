@@ -1,4 +1,6 @@
 //! Zig-native values for the Core-owned Coding world. These are not wire layouts.
+//! Keep record fields and variant cases in WIT order: the canonical encoder
+//! uses declaration order, independently of Zig's in-memory representation.
 
 pub fn Result(comptime Ok: type, comptime Err: type) type {
     return union(enum) { ok: Ok, err: Err };

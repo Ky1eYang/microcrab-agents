@@ -12,12 +12,27 @@ pub fn of(comptime T: type) Layout {
     if (T == types.OwnedBuffer or T == types.BorrowedBuffer) return word;
     return comptime switch (@typeInfo(T)) {
         .Void => empty,
-        .Bool, .Enum => .{ .size = 1, .alignment = 1 },
-        .Int => |integer| .{ .size = integer.bits / 8, .alignment = integer.bits / 8 },
-        .Float => |float| .{ .size = float.bits / 8, .alignment = float.bits / 8 },
+        .Bool => .{ .size = 1, .alignment = 1 },
+        .Enum => |enumeration| blk: {
+            if (enumeration.fields.len > 256) @compileError("oversized Coding enum");
+            for (enumeration.fields, 0..) |field, index| {
+                if (field.value != index) @compileError("WIT enums use ordinal tags");
+            }
+            break :blk .{ .size = 1, .alignment = 1 };
+        },
+        .Int => |integer| switch (integer.bits) {
+            8, 16, 32, 64 => .{ .size = integer.bits / 8, .alignment = integer.bits / 8 },
+            else => @compileError("unsupported Coding integer width"),
+        },
+        .Float => |float| if (float.bits == 64)
+            .{ .size = 8, .alignment = 8 }
+        else
+            @compileError("only f64 is used by the Coding world"),
         .Pointer => |pointer| if (pointer.size == .Slice) pair else @compileError("not a list"),
         .Optional => |optional| variant(of(optional.child)),
         .Union => |tagged| blk: {
+            const Tag = tagged.tag_type orelse @compileError("Coding variants must be tagged");
+            _ = of(Tag);
             var payload = empty;
             for (tagged.fields) |field| {
                 payload.size = @max(payload.size, of(field.type).size);

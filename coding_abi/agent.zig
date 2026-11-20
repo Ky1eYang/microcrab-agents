@@ -18,23 +18,47 @@ pub fn exportAgent(comptime Guest: type) void {
             defer codec.releaseInput(info, info_size);
             var scratch = std.heap.ArenaAllocator.init(memory.allocator);
             defer scratch.deinit();
-            return reply(types.DescribeResult, Guest.describe(scratch.allocator(), text(info, info_size)));
+            const result = Guest.describe(scratch.allocator(), text(info, info_size));
+            return reply(types.DescribeResult, result);
         }
 
-        fn invoke(info: u32, info_size: u32, name: u32, name_size: u32, args: u32, args_size: u32) callconv(.C) u32 {
+        fn invoke(
+            info: u32,
+            info_size: u32,
+            name: u32,
+            name_size: u32,
+            args: u32,
+            args_size: u32,
+        ) callconv(.C) u32 {
             defer codec.releaseInput(info, info_size);
             defer codec.releaseInput(name, name_size);
             defer codec.releaseInput(args, args_size);
             var scratch = std.heap.ArenaAllocator.init(memory.allocator);
             defer scratch.deinit();
-            return reply(types.InvokeResult, Guest.invoke(scratch.allocator(), text(info, info_size), text(name, name_size), text(args, args_size)));
+            const result = Guest.invoke(
+                scratch.allocator(),
+                text(info, info_size),
+                text(name, name_size),
+                text(args, args_size),
+            );
+            return reply(types.InvokeResult, result);
         }
 
         fn drive(buffer: u32, state: u32, state_size: u32, cancelled: u32) callconv(.C) u32 {
             defer codec.releaseInput(state, state_size);
             var scratch = std.heap.ArenaAllocator.init(memory.allocator);
             defer scratch.deinit();
-            const result = Guest.drive(scratch.allocator(), .{ .index = buffer }, codec.view(state, state_size), cancelled != 0);
+            const is_cancelled = switch (cancelled) {
+                0 => false,
+                1 => true,
+                else => @trap(),
+            };
+            const result = Guest.drive(
+                scratch.allocator(),
+                .{ .index = buffer },
+                codec.view(state, state_size),
+                is_cancelled,
+            );
             return reply(types.DriveResult, result);
         }
     };

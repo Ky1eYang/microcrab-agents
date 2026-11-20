@@ -88,7 +88,8 @@ fn listBytes(comptime Item: type, bytes: []const u8) []const u8 {
 
 fn put(comptime T: type, allocator: std.mem.Allocator, value: T, bytes: []u8) void {
     if (T == types.OwnedBuffer or T == types.BorrowedBuffer) {
-        writeInt(u32, bytes, 0, if (T == types.OwnedBuffer) value.index orelse @trap() else value.index);
+        const index = if (T == types.OwnedBuffer) value.index orelse @trap() else value.index;
+        writeInt(u32, bytes, 0, index);
         return;
     }
     switch (@typeInfo(T)) {
@@ -195,8 +196,8 @@ fn caseIndex(bytes: []const u8, count: u32) u8 {
 }
 
 fn releaseNested(comptime T: type, bytes: []const u8) void {
-    // Buffer handles in an export have already transferred to the Runtime when
-    // post-return runs; only linear-memory allocations are released here.
+    // Only release linear memory. Lifted import handles enter Zig ownership;
+    // exported handles have already transferred to Runtime by post-return.
     if (T == types.OwnedBuffer or T == types.BorrowedBuffer) return;
     switch (@typeInfo(T)) {
         .Optional => |optional| if (caseIndex(bytes, 2) == 1) {

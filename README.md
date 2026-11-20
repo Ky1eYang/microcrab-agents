@@ -26,6 +26,20 @@ and validates a real component against the Coding world. Test outputs remain in
 Zig's build cache and are not installable products. The Node fixture is not a
 substitute for Runtime/Host parity tests.
 
+For a real Core ABI smoke test, run the [isolated probe script](tools/test-core-abi.sh)
+with an initialized superproject, a Core checkout, and the pinned Zig executable:
+
+```sh
+bash tools/test-core-abi.sh /path/to/microcrab /path/to/microcrab-core /path/to/zig
+```
+
+It archives the selected committed Core source into the Agents build cache,
+uses a separate Rust target directory, and runs a locked/offline Core test
+through the root `xtask`. It exercises typed discovery/init, a constrained
+LocalHost read, rejection of an out-of-root path, owned buffered output transfer,
+and borrowed `drive` through completion. It does not change Core or stage any
+runtime bytes.
+
 ## Supplying a real guest
 
 See the [port handoff](docs/zig-coding-abi.md) for the `coding_abi` module,
