@@ -1,17 +1,18 @@
 # MicroCrab Agents
 
-This workspace contains the Zig 0.13.0 Coding ABI and its verification fixtures.
-It does **not** select a Zig Coding agent. Core still supplies the existing Rust
-Coding and Universal components by default. Existing Sessions retain their exact
-component pins. Nothing here stages or publishes runtime artifacts.
+This independent workspace contains the opt-in Zig 0.13.0 Coding Component and
+its verification fixtures. It does **not** select Zig by default: Core still
+supplies the existing Rust Coding and Universal components. Existing Sessions
+retain their exact component and discovery pins. Nothing here stages or publishes
+runtime artifacts.
 
 ## Local verification
 
 Use **Zig 0.13.0**. Formatting, native tests and core Wasm smoke tests:
 
 ```sh
-zig fmt --check build.zig build.zig.zon shared coding_abi tests
-zig build test                                    # Native memory/layout tests; default
+zig fmt --check build.zig build.zig.zon shared coding coding_abi tests
+zig build test                                    # Native tool, catalog and ABI tests; default
 zig build test-wasm                               # Core Wasm allocator smoke (Node.js)
 zig build check-wit -Dcore=/path/to/microcrab-core  # bash + wasm-tools
 zig build test-coding-abi -Dcore=/path/to/microcrab-core # Node.js + wasm-tools
@@ -40,14 +41,22 @@ LocalHost read, rejection of an out-of-root path, owned buffered output transfer
 and borrowed `drive` through completion. It does not change Core or stage any
 runtime bytes.
 
-## Supplying a real guest
+## Building the explicit candidate
 
-See the [port handoff](docs/zig-coding-abi.md) for the `coding_abi` module,
-callback signatures and ownership rules. An explicit guest can be built with:
+See the [ABI contract](docs/zig-coding-abi.md) for kernel boundaries, callback
+signatures and buffer ownership. Build the included Zig guest explicitly:
 
 ```sh
-zig build component -Dcore=/path/to/microcrab-core -Dcoding-guest=path/to/guest.zig
+zig build component -Dcore=/path/to/microcrab-core
 ```
+
+The candidate keeps inspection Allow and plan file mutations Deny. In plan mode,
+the actual linked shell defaults to Ask (Bash on Unix, PowerShell on Windows,
+validated configured shell elsewhere). This is not a permission override or an
+automatic grant. Enable it in a disposable Server catalog with an explicit path
+and select its exact Component digest when creating a new Session. Where historical
+Rust Coding Sessions must remain usable, retain their original bytes in the catalog
+and use `restore_only` as appropriate. Never write Zig bytes over a pinned Rust file.
 
 The [build](build.zig) compiles an entryless `wasm32-freestanding` core module
 in `ReleaseSmall`. `wasm-tools` embeds the Coding world with UTF-8 strings,

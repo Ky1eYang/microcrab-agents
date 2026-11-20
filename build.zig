@@ -7,7 +7,7 @@ comptime {
 }
 
 pub fn build(b: *std.Build) void {
-    const tests = b.step("test", "Run native canonical ABI memory and layout tests (default)");
+    const tests = b.step("test", "Run native Coding tool, catalog and ABI tests (default)");
     b.default_step = tests;
     const memory_tests = b.addTest(.{
         .root_source_file = b.path("shared/abi_memory.zig"),
@@ -21,6 +21,16 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     tests.dependOn(&b.addRunArtifact(layout_tests).step);
+    const coding_abi = b.createModule(.{ .root_source_file = b.path("coding_abi/root.zig") });
+    for ([_][]const u8{ "catalog_test", "text_test", "apply_patch_test", "image_test", "shell_test" }) |name| {
+        const tool_test = b.addTest(.{
+            .root_source_file = b.path(b.fmt("coding/{s}.zig", .{name})),
+            .target = b.host,
+            .optimize = .Debug,
+        });
+        tool_test.root_module.addImport("coding_abi", coding_abi);
+        tests.dependOn(&b.addRunArtifact(tool_test).step);
+    }
 
     const abi = freestanding(b, "abi-memory", b.path("shared/wasm_abi.zig"));
     abi.root_module.export_symbol_names = &.{"cabi_realloc"};
@@ -56,14 +66,11 @@ pub fn build(b: *std.Build) void {
         probe_step.dependOn(check);
     }
 
-    const component = b.step("component", "Build a validated Coding Component from an explicit real guest source");
-    const guest_source = b.option([]const u8, "coding-guest", "Real Coding guest Zig entry point");
-    if (guest_source) |source| {
-        if (core == null) {
-            component.makeFn = requireCore;
-            return;
-        }
-        const wasm = freestanding(b, "coding", .{ .cwd_relative = source });
+    const component = b.step("component", "Build the opt-in Zig Coding Component without staging it");
+    const guest_source = b.option([]const u8, "coding-guest", "Override the Coding guest source for an isolated fixture");
+    if (core != null) {
+        const source: std.Build.LazyPath = if (guest_source) |path| .{ .cwd_relative = path } else b.path("coding/main.zig");
+        const wasm = freestanding(b, "coding", source);
         addCodingAbi(b, wasm);
         const packaging = addCodingComponent(b, check, wasm);
         // Explicit build output only; never selected by the default or install step.
@@ -71,7 +78,7 @@ pub fn build(b: *std.Build) void {
         output.step.dependOn(packaging.verified);
         component.dependOn(&output.step);
     } else {
-        component.makeFn = requireGuest;
+        component.makeFn = requireCore;
     }
 }
 
@@ -141,8 +148,4 @@ fn addCodingAbi(b: *std.Build, wasm: *std.Build.Step.Compile) void {
 
 fn requireCore(step: *std.Build.Step, _: std.Progress.Node) !void {
     return step.fail("pass -Dcore=/path/to/microcrab-core to check canonical WIT", .{});
-}
-
-fn requireGuest(step: *std.Build.Step, _: std.Progress.Node) !void {
-    return step.fail("component requires a real -Dcoding-guest=PATH and -Dcore=PATH", .{});
 }
