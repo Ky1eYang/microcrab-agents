@@ -14,6 +14,17 @@ pub fn function(comptime F: type, comptime module: []const u8, comptime name: []
     return @extern(*const F, .{ .library_name = module, .name = name });
 }
 
+/// The canonical intrinsic removes an owned or scoped borrowed table entry.
+/// Runtime's underlying buffer destructor runs only for an owned entry.
+pub fn dropBufferEntry(index: u32) void {
+    const raw = function(
+        fn (u32) callconv(.C) void,
+        "microcrab:agent/execution@0.8.0",
+        "[resource-drop]buffer",
+    );
+    raw(index);
+}
+
 pub fn slice(value: []const u8) struct { u32, u32 } {
     return .{ if (value.len == 0) 0 else codec.pointer(value), value.len };
 }

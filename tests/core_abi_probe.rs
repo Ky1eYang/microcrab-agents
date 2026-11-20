@@ -74,6 +74,5 @@ async fn canonical_zig_component_uses_runtime_and_constrained_local_host() {
     })
     .await
     .expect("Runtime drove Zig continuation to completion");
-    assert!(text.starts_with("initial:"));
-    assert!(text.contains("hello Zig Ω"));
+    assert_eq!(text, "initial:.......hello Zig Ω\n");
 }

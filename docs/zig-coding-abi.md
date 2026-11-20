@@ -41,7 +41,9 @@ storage is gone before lowering begins.
 `buffer.borrow()` for operations. Use `buffer.take()` exactly once to transfer
 ownership in `.ok = .{ .buffered = ... }`; defer `abi.execution.drop(&buffer)`
 to close an untransferred buffer on early exits. Zig structs are copyable; do
-not duplicate owners. A `drive` callback receives only a borrow. Host process
+not duplicate owners. A `drive` callback receives only a borrow. The ABI
+closes its scoped canonical table entry when the callback returns; the
+underlying Runtime buffer remains owned by Runtime. Host process
 and file handles are scoped identities, not WIT resources: their lifecycle is
 explicitly controlled by the existing Host/Runtime operations.
 

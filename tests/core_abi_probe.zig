@@ -57,7 +57,8 @@ pub fn invoke(scratch: Scratch, _: []const u8, name: []const u8, arguments: []co
         .ok => {},
         .err => |err| return .{ .err = err },
     }
-    switch (abi.execution.attachGuest(scratch, borrow, result.content)) {
+    const state = std.mem.concat(scratch, u8, &.{ "\x00", result.content }) catch @trap();
+    switch (abi.execution.attachGuest(scratch, borrow, state)) {
         .ok => {},
         .err => |err| return .{ .err = err },
     }
@@ -71,13 +72,19 @@ pub fn drive(scratch: Scratch, buffer: t.BorrowedBuffer, state: []const u8, canc
         .message = "fixture cancelled",
         .retryable = false,
     } };
-    switch (abi.execution.append(scratch, buffer, "result", state)) {
+    if (state.len == 0 or state[0] > 7) @trap();
+    if (state[0] == 7) {
+        switch (abi.execution.append(scratch, buffer, "result", state[1..])) {
+            .ok => {},
+            .err => |err| return .{ .err = err },
+        }
+        return .{ .ok = .{ .state = &.{}, .wake_after_ms = 0, .finished = true } };
+    }
+    const next = scratch.dupe(u8, state) catch @trap();
+    next[0] += 1;
+    switch (abi.execution.append(scratch, buffer, "result", ".")) {
         .ok => {},
         .err => |err| return .{ .err = err },
     }
-    switch (abi.execution.finish(scratch, buffer, null)) {
-        .ok => {},
-        .err => |err| return .{ .err = err },
-    }
-    return .{ .ok = .{ .state = &.{}, .wake_after_ms = 0, .finished = true } };
+    return .{ .ok = .{ .state = next, .wake_after_ms = 1, .finished = false } };
 }

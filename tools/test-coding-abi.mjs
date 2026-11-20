@@ -9,6 +9,8 @@ let memory;
 let realloc;
 let communicationError = false;
 let dropCount = 0;
+let borrowDropCount = 0;
+let pendingBorrow = false;
 let markCount = 0;
 let mutationCount = 0;
 const dynamic = 0x100000000n;
@@ -120,7 +122,10 @@ mock(execution, 'mark-truncated', (id, at) => {
 });
 mock(execution, '[resource-drop]buffer', id => {
     assert.equal(id, buffer);
-    dropCount++;
+    if (pendingBorrow) {
+        pendingBorrow = false;
+        borrowDropCount++;
+    } else dropCount++;
 });
 mock('text-read', 'read', (ptr, len, offset, lines, max, at) => {
     assert.equal(stringAt(ptr, len), path);
@@ -368,14 +373,18 @@ function run() {
     assert.equal(get8(result + 12), 1);
     exports.cabi_post_invoke(result);
 
+    pendingBorrow = true;
     result = exports.drive(buffer, ...alloc(Uint8Array.of(0xff, 0, 0x80)), 0);
+    assert.equal(pendingBorrow, false, 'borrow removed before returning success');
     assert.equal(get8(result), 0);
     assert.deepEqual([...bytes(get32(result + 8), get32(result + 12))], [255, 0, 128]);
     assert.equal(get64(result + 16), dynamic + 1n);
     assert.equal(get8(result + 24), 1);
     exports.cabi_post_drive(result);
 
+    pendingBorrow = true;
     result = exports.drive(buffer, ...alloc('never retained'), 1);
+    assert.equal(pendingBorrow, false, 'borrow removed before returning typed failure');
     assert.equal(get8(result), 1);
     assert.equal(get8(result + 8), 2);
     assert.equal(getText(result + 12), 'cancelled');
@@ -394,6 +403,7 @@ const memoryHighWater = memory.buffer.byteLength;
 for (let i = 0; i < 127; i++) run();
 assert.equal(memory.buffer.byteLength, memoryHighWater);
 assert.equal(dropCount, 128, 'only untransferred owners are dropped by the guest');
+assert.equal(borrowDropCount, 256, 'each drive closes only its scoped borrow entry');
 assert.equal(markCount, 128, 'each non-cancelled drive uses its borrowed resource once');
 assert.equal(mutationCount, 3 * 128);
 

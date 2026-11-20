@@ -3,6 +3,7 @@ const std = @import("std");
 const memory = @import("wasm_abi");
 const types = @import("types.zig");
 const codec = @import("codec.zig");
+const wire = @import("imports.zig");
 
 /// Export the Agent 0.8 core signatures plus its canonical post-return functions.
 pub fn exportAgent(comptime Guest: type) void {
@@ -45,6 +46,9 @@ pub fn exportAgent(comptime Guest: type) void {
         }
 
         fn drive(buffer: u32, state: u32, state_size: u32, cancelled: u32) callconv(.C) u32 {
+            // Buffer is imported. Core lowered the borrow to a temporary guest
+            // table entry that must be dropped before the lifted call exits.
+            defer wire.dropBufferEntry(buffer);
             defer codec.releaseInput(state, state_size);
             var scratch = std.heap.ArenaAllocator.init(memory.allocator);
             defer scratch.deinit();

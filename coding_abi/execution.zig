@@ -20,8 +20,7 @@ pub fn create(scratch: Scratch, channels: []const []const u8) types.Result(types
 pub fn drop(buffer: *types.OwnedBuffer) void {
     const index = buffer.index orelse return;
     buffer.index = null;
-    const raw = wire.function(fn (u32) callconv(.C) void, module, "[resource-drop]buffer");
-    raw(index);
+    wire.dropBufferEntry(index);
 }
 
 pub fn append(scratch: Scratch, buffer: types.BorrowedBuffer, channel: ?[]const u8, content: []const u8) Status {
