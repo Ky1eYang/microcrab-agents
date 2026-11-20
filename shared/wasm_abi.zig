@@ -11,7 +11,7 @@ comptime {
 pub const allocator = std.heap.page_allocator;
 
 /// The Canonical ABI expects a trap on allocation failure, not a null address.
-export fn cabi_realloc(old: ?[*]u8, old_size: usize, alignment: usize, new_size: usize) usize {
+pub export fn cabi_realloc(old: ?[*]u8, old_size: usize, alignment: usize, new_size: usize) usize {
     // Canonical Coding value layouts align to at most 8 bytes. Allow up to a
     // page, so the backing allocator never needs to over-align memory.grow.
     if (alignment > std.mem.page_size) @trap();
