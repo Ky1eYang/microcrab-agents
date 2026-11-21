@@ -1,0 +1,17 @@
+.{
+    .name = "microcrab-agent-coding",
+    .version = "0.1.0",
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{
+        .shared = .{ .path = "../../shared" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "abi",
+        "tests",
+        "tools",
+        "wit",
+    },
+}

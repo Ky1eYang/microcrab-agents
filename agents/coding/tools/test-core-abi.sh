@@ -2,18 +2,18 @@
 # Exercise the real Runtime without changing the selected Core checkout or shared target.
 set -euo pipefail
 if [[ $# -ne 3 ]]; then
-    printf 'Usage: bash tools/test-core-abi.sh ROOT_REPO CORE_REPO ZIG_0_13_0\n' >&2
+    printf 'Usage: bash %s ROOT_REPO CORE_REPO ZIG_0_13_0\n' "${BASH_SOURCE[0]}" >&2
     exit 2
 fi
-agents=$(dirname -- "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")")
+coding=$(dirname -- "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")")
 root=$(realpath -- "$1")
 core=$(realpath -- "$2")
 zig=$(realpath -- "$3")
-cd -- "$agents"
+cd -- "$coding"
 
 # Archive the committed source, not the caller's potentially dirty checkout.
 # Reuse the isolated target but use a fresh source and output path for this run.
-cache="$agents/.zig-cache/core-abi-smoke"
+cache="$coding/.zig-cache/core-abi-smoke"
 mkdir -p -- "$cache"
 work=$(mktemp -d "$cache/run.XXXXXXXX")
 mkdir -- "$work/core"
