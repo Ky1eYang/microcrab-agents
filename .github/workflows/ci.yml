@@ -1,0 +1,42 @@
+name: Zig checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  coding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 --output zig.tar.xz https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 --output wasm-tools.tar.gz https://github.com/bytecodealliance/wasm-tools/releases/download/v1.263.0/wasm-tools-1.263.0-x86_64-linux.tar.gz
+          printf '%s\n' \
+            'd45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  zig.tar.xz' \
+            '21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431  wasm-tools.tar.gz' | sha256sum --check
+          tar -xf zig.tar.xz
+          tar -xf wasm-tools.tar.gz
+          printf '%s\n' "$RUNNER_TEMP/zig-linux-x86_64-0.13.0" "$RUNNER_TEMP/wasm-tools-1.263.0-x86_64-linux" >> "$GITHUB_PATH"
+      - name: Format and test the aggregate
+        run: |
+          zig fmt --check build.zig build.zig.zon agents shared
+          zig build test
+          zig build test-wasm
+          zig build check-vendored-component
+      - name: Verify the package entry point
+        working-directory: agents/coding
+        run: |
+          zig build test
+          zig build check-vendored-component

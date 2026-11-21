@@ -1,7 +1,8 @@
 # Zig Coding ABI handoff
 
-The [Core WIT mirrors](../wit/world.wit) are the canonical contract. Zig tool
-ports use `const abi = @import("coding_abi");` and [Zig-native DTOs](../coding_abi/types.zig):
+The [Coding world](../agents/coding/wit/world.wit) imports byte-for-byte mirrors
+of the canonical Core interfaces. Zig tool ports use
+`const abi = @import("coding_abi");` and [Zig-native DTOs](../agents/coding/abi/types.zig):
 WIT names use `snake_case`, options use Zig `?T`, lists use slices, and replies
 use tagged `.ok` / `.err`. Neither a Host error nor a mutation receipt is
 converted into a Zig error set or interpreted by the binding.
@@ -47,6 +48,7 @@ underlying Runtime buffer remains owned by Runtime. Host process
 and file handles are scoped identities, not WIT resources: their lifecycle is
 explicitly controlled by the existing Host/Runtime operations.
 
-This interface does not implement tool arguments, policy, or parity. The only
-approved policy change for the final catalog is Ask for the actual Host shell
-in plan mode. The default Rust Coding and Universal are unchanged.
+This binding does not implement tool arguments or policy. The
+[catalog](../agents/coding/src/catalog.zig) defines the actual tool permissions,
+including PLAN's Session-bound Markdown exceptions and Ask for the linked shell.
+The default Rust Coding and Universal are unchanged.
