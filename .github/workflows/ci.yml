@@ -30,6 +30,8 @@ jobs:
           tar -xf wasm-tools.tar.gz
           printf '%s\n' "$RUNNER_TEMP/zig-linux-x86_64-0.13.0" "$RUNNER_TEMP/wasm-tools-1.263.0-x86_64-linux" >> "$GITHUB_PATH"
       - name: Format and test the aggregate
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-aggregate
         run: |
           zig fmt --check build.zig build.zig.zon agents shared
           zig build test
@@ -37,6 +39,8 @@ jobs:
           zig build check-vendored-component
       - name: Verify the package entry point
         working-directory: agents/coding
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-global-coding
         run: |
           zig build test
           zig build check-vendored-component
