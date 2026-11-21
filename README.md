@@ -18,9 +18,10 @@ zig build check-wit -Dcore=/path/to/microcrab-core  # bash + wasm-tools
 zig build test-coding-abi -Dcore=/path/to/microcrab-core # Node.js + wasm-tools
 ```
 
-The [Coding world](wit/world.wit), [Agent ABI 0.8](wit/deps/agent/agent.wit) and
-[Host ABI](wit/deps/host/host.wit) are byte-for-byte mirrors, not new contract
-sources. The [drift check](tools/check-wit.sh) never rewrites either repository.
+The [Coding world](wit/world.wit) selects imports from byte-for-byte mirrors of
+[Agent ABI 0.8](wit/deps/agent/agent.wit), [Host ABI](wit/deps/host/host.wit) and
+[Session Variables 0.2](wit/deps/session-scoped/scoped-variables.wit). The
+[drift check](tools/check-wit.sh) never rewrites either repository.
 `test-coding-abi` compiles a [test-only probe](tests/abi_probe.zig), checks wire
 values and ownership in a [Node.js witness](tools/test-coding-abi.mjs), and links
 and validates a real component against the Coding world. Test outputs remain in
@@ -50,10 +51,17 @@ signatures and buffer ownership. Build the included Zig guest explicitly:
 zig build component -Dcore=/path/to/microcrab-core
 ```
 
-The candidate keeps inspection Allow and plan file mutations Deny. In plan mode,
-the actual linked shell defaults to Ask (Bash on Unix, PowerShell on Windows,
-validated configured shell elsewhere). This is not a permission override or an
-automatic grant. Enable it in a disposable Server catalog with an explicit path
+In plan mode, `write` may atomically create a missing lowercase `.md` without
+`expected_version`. The guest derives the title and description from the body,
+and uses the exact admitted Session ID and UTC Unix milliseconds in its YAML
+frontmatter. `edit` accepts the generated header only for the same Session,
+changes the body with the normal version check, and refreshes the edit time.
+Frontmatter is not a cryptographic provenance signature. The actual linked shell
+and single-file `patch` default to Ask, and `apply_patch` remains Deny. Build
+mode and Host restrictions are unchanged. Typed Session Variables 0.2 supplies
+read-only `tool-call-facts`; the admitted mode is distinct from the latest State
+mode. Build and use this Component with a matching Server. Enable it in a
+disposable Server catalog with an explicit path
 and select its exact Component digest when creating a new Session. Where historical
 Rust Coding Sessions must remain usable, retain their original bytes in the catalog
 and use `restore_only` as appropriate. Never write Zig bytes over a pinned Rust file.

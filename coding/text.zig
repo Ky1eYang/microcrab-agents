@@ -1,6 +1,11 @@
 //! Coding text tools: validate and render here; the Host owns effects and permissions.
 const std = @import("std");
 const types = @import("coding_abi").types;
+const plan = @import("plan.zig");
+
+pub fn needsToolCallFacts(name: []const u8) bool {
+    return std.mem.eql(u8, name, "write") or std.mem.eql(u8, name, "edit");
+}
 const Allocator = std.mem.Allocator;
 const ToolFailure = types.ToolFailure;
 const Result = types.Result;
@@ -16,8 +21,26 @@ const pattern_bytes = 1024;
 /// The caller gates availability against the same catalog used by describe. Pass
 /// `abi.host` in the guest, or matching interfaces in native tests. Results and
 /// requests may borrow the call inputs or scratch (the callback arena).
-pub fn invoke(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype) Result([]const u8, ToolFailure) {
-    return invokeInner(scratch, name, arguments, host) catch .{ .err = allocation_failure };
+pub fn invoke(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, invocation: ?types.CallFacts) Result([]const u8, ToolFailure) {
+    const facts = if (needsToolCallFacts(name)) blk: {
+        const admitted = invocation orelse return .{ .err = planDenied("missing admitted invocation context") };
+        const is_plan = if (admitted.admitted_mode) |mode| blk_mode: {
+            if (std.mem.eql(u8, mode, "plan")) break :blk_mode true;
+            if (std.mem.eql(u8, mode, "build")) break :blk_mode false;
+            return .{ .err = invalidFacts("UnknownInvocationMode") };
+        } else false;
+        if (!plan.validSessionId(admitted.session_id)) return .{ .err = invalidFacts("InvalidInvocationSession") };
+        break :blk if (is_plan) admitted else null;
+    } else null;
+    return invokeInner(scratch, name, arguments, host, facts) catch .{ .err = allocation_failure };
+}
+
+fn invalidFacts(message: []const u8) ToolFailure {
+    return .{ .kind = .failed, .code = "failed", .message = message, .retryable = false };
+}
+
+fn planDenied(message: []const u8) ToolFailure {
+    return operationFailure(.{ .code = .denied, .message = message });
 }
 
 const allocation_failure: ToolFailure = .{
@@ -170,7 +193,7 @@ fn json(scratch: Allocator, value: anytype) Allocator.Error!Result([]const u8, T
     return .{ .ok = try std.json.stringifyAlloc(scratch, value, .{}) };
 }
 
-fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype) Allocator.Error!Result([]const u8, ToolFailure) {
+fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, facts: ?types.CallFacts) Allocator.Error!Result([]const u8, ToolFailure) {
     if (arguments.len > max_arguments) return .{ .err = invalid("argument byte limit exceeded") };
     const Tool = enum { read, glob, grep, write, edit, patch };
     switch (std.meta.stringToEnum(Tool, name) orelse return .{ .err = invalid("unknown tool") }) {
@@ -259,7 +282,14 @@ fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host
                 if (!validDigest(version)) return .{ .err = invalid_digest };
                 break :blk .{ .version = std.ascii.lowerString(&lower, version) };
             } else .missing;
-            const output = switch (controlledWrite(scratch, host, .{ .path = a.path.value, .content = a.content.value, .precondition = precondition })) {
+            const content = if (facts) |admitted| blk: {
+                if (!plan.markdownPath(a.path.value) or precondition != .missing) return .{ .err = planDenied("PLAN write requires a new .md path and omitted expected_version") };
+                if (plan.suppliedHeader(a.content.value)) return .{ .err = invalid("PLAN write accepts Markdown body only; omit frontmatter") };
+                const generated = try plan.create(scratch, a.path.value, a.content.value, admitted.session_id, admitted.observed_at_unix_ms);
+                if (generated.len > max_bytes or countLines(generated) > max_lines) return .{ .err = invalid("plan including generated metadata exceeds edit limits") };
+                break :blk generated;
+            } else a.content.value;
+            const output = switch (controlledWrite(scratch, host, .{ .path = a.path.value, .content = content, .precondition = precondition })) {
                 .ok => |out| out,
                 .err => |err| return .{ .err = err },
             };
@@ -270,14 +300,14 @@ fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host
                 .ok => |args| args,
                 .err => |err| return .{ .err = err },
             };
-            return replace(scratch, host, a.path.value, a.expected_version.value, &.{.{ .old_string = a.old_string, .new_string = a.new_string, .replace_all = a.replace_all }});
+            return replace(scratch, host, a.path.value, a.expected_version.value, &.{.{ .old_string = a.old_string, .new_string = a.new_string, .replace_all = a.replace_all }}, facts);
         },
         .patch => {
             const a = switch (try parse(PatchArgs, scratch, arguments)) {
                 .ok => |args| args,
                 .err => |err| return .{ .err = err },
             };
-            return replace(scratch, host, a.path.value, a.expected_version.value, a.replacements.values.constSlice());
+            return replace(scratch, host, a.path.value, a.expected_version.value, a.replacements.values.constSlice(), null);
         },
     }
 }
@@ -368,8 +398,9 @@ fn committedJson(scratch: Allocator, value: anytype) Result([]const u8, ToolFail
     } };
 }
 
-fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []const u8, replacements: []const Replacement) Allocator.Error!Result([]const u8, ToolFailure) {
+fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []const u8, replacements: []const Replacement, facts: ?types.CallFacts) Allocator.Error!Result([]const u8, ToolFailure) {
     if (checkString(path, path_bytes, true)) |err| return .{ .err = err };
+    if (facts != null and !plan.markdownPath(path)) return .{ .err = planDenied("PLAN edit requires a .md path") };
     if (!validDigest(expected)) return .{ .err = invalid_digest };
     for (replacements) |r| {
         if (checkString(r.old_string.value, max_bytes, true) orelse checkString(r.new_string.value, max_bytes, false)) |err| return .{ .err = err };
@@ -386,6 +417,14 @@ fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []cons
         .message = "file version differs from expected_version",
     }) };
 
+    if (facts != null and std.mem.indexOfScalar(u8, original.content, 0) != null) return .{ .err = invalid("plan file contains NUL") };
+    const verified = if (facts) |admitted| plan.verify(scratch, original.content, admitted.session_id) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.MalformedHeader => return .{ .err = planDenied("PLAN edit requires exact Coding-generated frontmatter") },
+        error.OtherSession => return .{ .err = planDenied("plan frontmatter belongs to a different Session") },
+    } else null;
+    const body = if (verified) |header| header.body else original.content;
+
     var workspace: LiteralWorkspace = .{};
     defer workspace.deinit(scratch);
     var buffers: [2]std.ArrayListUnmanaged(u8) = .{ .{}, .{} };
@@ -393,7 +432,7 @@ fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []cons
     var counts: std.BoundedArray(usize, max_replacements) = .{};
     var added: usize = 0;
     var removed: usize = 0;
-    var content = original.content;
+    var content = body;
     for (replacements, 0..) |r, i| {
         const old = r.old_string.value;
         const new = r.new_string.value;
@@ -411,12 +450,17 @@ fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []cons
             removed += countLines(old) * count;
         }
     }
-    if (std.mem.eql(u8, original.content, content)) return json(scratch, .{
+    if (std.mem.eql(u8, body, content)) return json(scratch, .{
         .version = original.version,
-        .bytes = content.len,
+        .bytes = original.content.len,
         .changed = false,
         .replacement_counts = counts.constSlice(),
     });
+    if (verified) |header| {
+        if (plan.suppliedHeader(content)) return .{ .err = invalid("PLAN edit cannot introduce frontmatter into the Markdown body") };
+        content = try header.refresh(scratch, content, facts.?.observed_at_unix_ms);
+        if (content.len > max_bytes or countLines(content) > max_lines) return .{ .err = invalid("plan including generated metadata exceeds edit limits") };
+    }
     const output = switch (controlledWrite(scratch, host, .{ .path = path, .content = content, .precondition = .{ .version = original.version } })) {
         .ok => |out| out,
         .err => |err| return .{ .err = err },

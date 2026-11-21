@@ -64,7 +64,19 @@ pub fn invoke(scratch: Allocator, supplied: []const u8, name: []const u8, argume
     }
     if (eq(u8, name, "read_image")) return image.invoke(scratch, arguments);
     const multi_patch = eq(u8, name, "apply_patch");
-    const result = if (multi_patch) patch.invoke(scratch, arguments) else text.invoke(scratch, name, arguments, abi.host);
+    const facts: ?types.CallFacts = if (text.needsToolCallFacts(name))
+        switch (abi.session.toolCallFacts(scratch)) {
+            .ok => |value| value,
+            .err => |failure| return .{ .err = .{
+                .kind = if (failure.code == .cancelled) .cancelled else .failed,
+                .code = @tagName(failure.code),
+                .message = failure.message,
+                .retryable = false,
+            } },
+        }
+    else
+        null;
+    const result = if (multi_patch) patch.invoke(scratch, arguments) else text.invoke(scratch, name, arguments, abi.host, facts);
     const content = switch (result) {
         .ok => |value| value,
         .err => |failure| return .{ .err = failure },

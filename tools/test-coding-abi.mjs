@@ -13,6 +13,7 @@ let borrowDropCount = 0;
 let pendingBorrow = false;
 let markCount = 0;
 let mutationCount = 0;
+let factsCount = 0;
 const dynamic = 0x100000000n;
 const buffer = 73;
 const file = dynamic + 9n;
@@ -58,9 +59,9 @@ function response(at, size, alignment, tag = 0) {
     return at + alignment;
 }
 function mock(interfaceName, name, fn) {
-    const namespace = interfaceName.startsWith('agent/') ? 'agent' : 'host';
-    const version = namespace === 'agent' ? '0.8.0' : '0.1.0';
-    const key = `microcrab:${namespace}/${interfaceName.replace(/^agent\//, '')}@${version}`;
+    const [namespace, nameOfInterface] = interfaceName.includes('/') ? interfaceName.split('/') : ['host', interfaceName];
+    const version = { agent: '0.8.0', host: '0.1.0', session: '0.2.0' }[namespace];
+    const key = `microcrab:${namespace}/${nameOfInterface}@${version}`;
     (imports[key] ??= {})[name] = fn;
 }
 function okVoid(at) {
@@ -321,6 +322,73 @@ mock('process', 'release', (id, tag, pid, at) => {
     response(at, 16, 4);
 });
 
+const session = 'session/variables';
+mock(session, 'tool-call-facts', at => {
+    const phase = factsCount++ % 3;
+    if (phase === 2) {
+        const out = response(at, 40, 8, 1);
+        put8(out, 1);
+        writeList(out + 4, 'not admitted');
+        return;
+    }
+    const out = response(at, 40, 8);
+    writeList(out, 'session-exact-🦀');
+    put8(out + 8, phase === 0 ? 1 : 0);
+    if (phase === 0) writeList(out + 12, 'plan');
+    put64(out + 24, phase === 0 ? 0xfedcba9876543210n : 1n);
+});
+mock(session, 'variable-get', (ptr, len, at) => {
+    const name = stringAt(ptr, len);
+    if (name === 'null-value') writeList(response(at, 16, 4), 'null');
+    else {
+        assert.equal(name, 'missing');
+        opError(at, 0, 'not found');
+    }
+});
+mock(session, 'variable-get-all', at => {
+    const list = listArea(response(at, 16, 4), 16, 2, 4);
+    writeList(list, 'value-🦀');
+    writeList(list + 8, '[false,{},null]');
+    writeList(list + 16, 'other');
+    writeList(list + 24, 'true');
+});
+mock(session, 'variable-metadata', at => {
+    const list = listArea(response(at, 16, 4), 20, 2, 4);
+    writeList(list, 'value-🦀');
+    put8(list + 8, 1); // invisible
+    put8(list + 9, 0); // persisted
+    put8(list + 10, 1); // client owner
+    writeList(list + 12, Uint8Array.of(0, 2)); // runtime, agent
+    writeList(list + 20, 'secret');
+    put8(list + 28, 2); // secret
+    put8(list + 29, 1); // ephemeral
+    put8(list + 30, 1); // client owner
+    writeList(list + 32, Uint8Array.of());
+});
+mock(session, 'variable-change', (set, sets, remove, removes, scoped, scopes, at) => {
+    if (sets === 0) {
+        assert.deepEqual([set, sets, remove, removes, scoped, scopes], [0, 0, 0, 0, 0, 0]);
+        opError(at, 2, 'fixture rejection');
+        return;
+    }
+    assert.deepEqual([sets, removes, scopes], [2, 2, 3]);
+    assert.deepEqual([set % 4, remove % 4, scoped % 4], [0, 0, 0]);
+    assert.deepEqual([getText(set), getText(set + 8), getText(set + 16), getText(set + 24)], ['plain', '{"a":1}', 'bool', 'false']);
+    assert.deepEqual([getText(remove), getText(remove + 8)], ['gone', 'gone-🦀']);
+    const entries = [
+        ['keep-editors', 'null', 1, 1, 0],
+        ['clear-editors', '[]', 0, 0, 1],
+        ['new-editors', '42', 1, 0, 1],
+    ];
+    for (const [i, expected] of entries.entries()) {
+        const row = scoped + i * 32;
+        assert.deepEqual([getText(row), getText(row + 8), get8(row + 16), get8(row + 17), get8(row + 20)], expected);
+    }
+    assert.deepEqual([get32(scoped + 56), get32(scoped + 60)], [0, 0]); // Some([])
+    assert.deepEqual([...bytes(get32(scoped + 88), get32(scoped + 92))], [1, 0, 2]);
+    response(at, 16, 4);
+});
+
 const module = new WebAssembly.Module(readFileSync(process.argv[2]));
 assert.equal(WebAssembly.Module.imports(module).length,
     Object.values(imports).reduce((sum, namespace) => sum + Object.keys(namespace).length, 0));
@@ -394,6 +462,11 @@ function run() {
     assert.deepEqual([get8(result), get8(result + 4)], [0, 0]);
     assert.equal(getText(result + 8), text);
     exports.cabi_post_invoke(result);
+
+    result = exports.invoke(...alloc(''), ...alloc('session'), ...alloc(''));
+    assert.deepEqual([get8(result), get8(result + 4)], [0, 0]);
+    assert.equal(getText(result + 8), 'session-exact-🦀');
+    exports.cabi_post_invoke(result);
 }
 
 // Stabilized linear memory under repeated all-branch calls witnesses reclamation
@@ -406,6 +479,7 @@ assert.equal(dropCount, 128, 'only untransferred owners are dropped by the guest
 assert.equal(borrowDropCount, 256, 'each drive closes only its scoped borrow entry');
 assert.equal(markCount, 128, 'each non-cancelled drive uses its borrowed resource once');
 assert.equal(mutationCount, 3 * 128);
+assert.equal(factsCount, 3 * 128, 'each session probe exercises both mode options and a typed error');
 
 function runBulk() {
     const result = exports.invoke(...alloc(''), ...alloc('bulk'), ...alloc(path));
@@ -419,4 +493,4 @@ const bulkMemoryHighWater = memory.buffer.byteLength;
 assert.ok(bulkMemoryHighWater < 64 * 1024 * 1024);
 for (let i = 0; i < 8; i++) runBulk();
 assert.equal(memory.buffer.byteLength, bulkMemoryHighWater);
-console.log('Coding ABI: 128 rounds and 4096-entry list lifting/reclamation passed.');
+console.log('Coding ABI: 128 rounds including typed Session imports, and 4096-entry list lifting/reclamation passed.');

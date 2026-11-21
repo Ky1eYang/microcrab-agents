@@ -92,13 +92,20 @@ const Baseline = struct {
     variables: Variables,
     shell: Shell,
 };
+const Matcher = struct { kind: enum { exact, regex }, value: []const u8 };
+const Predicate = struct { pointer: []const u8, matcher: Matcher };
 const Permission = struct {
     agent: []const u8,
     mode: []const u8,
-    tool: struct { kind: []const u8 = "exact", value: []const u8 },
-    args: [0]Value = .{},
+    tool: Matcher,
+    args: []const Predicate = &.{},
     action: enum { allow, ask, deny },
 };
+// Core anchors argument regexes to the full input string.
+const markdown = [_]Predicate{.{ .pointer = "/path", .matcher = .{ .kind = .regex, .value = "(?s:.*)\\.md" } }};
+// Predicates see strings only. The schema rejects other types; the guest also
+// rejects a supplied expected_version in the actual resolved write arguments.
+const version_present = [_]Predicate{.{ .pointer = "/expected_version", .matcher = .{ .kind = .regex, .value = "(?s:.*)" } }};
 const Mode = struct {
     name: []const u8,
     description: []const u8,
@@ -132,19 +139,33 @@ pub fn describe(scratch: Allocator, host: HostInfo) ![]const u8 {
     }
     const modes = try scratch.alloc(Mode, base.modes.len);
     for (base.modes, modes) |mode, *out| {
-        const permissions = try scratch.alloc(Permission, tools.items.len);
-        for (tools.items, permissions) |tool, *rule| {
+        var permissions = try std.ArrayList(Permission).initCapacity(scratch, tools.items.len + 3);
+        for (tools.items) |tool| {
             const name = tool.name;
             const read_only = eq(name, "read") or eq(name, "read_image") or eq(name, "glob") or eq(name, "grep");
             const actual_shell = if (shell) |actual| eq(name, actual) else false;
-            rule.* = .{
+            const plan_mode = eq(mode.name, "plan");
+            var rule: Permission = .{
                 .agent = base.name,
                 .mode = mode.name,
-                .tool = .{ .value = name },
-                .action = if (read_only) .allow else if (actual_shell or eq(mode.name, "build")) .ask else .deny,
+                .tool = .{ .kind = .exact, .value = name },
+                .action = if (read_only) .allow else if (actual_shell or !plan_mode or eq(name, "patch")) .ask else .deny,
             };
+            permissions.appendAssumeCapacity(rule);
+            // Core evaluates last match first: deny a versioned write before
+            // allowing Markdown paths, with the unconditional deny as fallback.
+            if (plan_mode and (eq(name, "write") or eq(name, "edit"))) {
+                rule.action = .allow;
+                rule.args = &markdown;
+                permissions.appendAssumeCapacity(rule);
+                if (eq(name, "write")) {
+                    rule.action = .deny;
+                    rule.args = &version_present;
+                    permissions.appendAssumeCapacity(rule);
+                }
+            }
         }
-        out.* = .{ .name = mode.name, .description = mode.description, .prompt = mode.prompt, .role = mode.role, .permissions = permissions };
+        out.* = .{ .name = mode.name, .description = mode.description, .prompt = mode.prompt, .role = mode.role, .permissions = permissions.items };
     }
     var variables = base.variables;
     if (host.description) |description| {

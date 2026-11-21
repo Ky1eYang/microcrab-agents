@@ -13,8 +13,10 @@ check() {
         return 1
     fi
 }
-check crates/agent/coding/wit/world.wit wit/world.wit
+# The independent Zig world adds Session services to the Rust Coding base.
+# Compare the shared interfaces without treating guest-owned world selection as canonical.
+check crates/session/wit/scoped-variables.wit wit/deps/session-scoped/scoped-variables.wit
 check crates/agent/wit/wit/agent.wit wit/deps/agent/agent.wit
 check crates/host/wit/host.wit wit/deps/host/host.wit
 wasm-tools component wit "$root/wit" >/dev/null
-printf 'Coding world, Agent ABI, and Host WIT match Core.\n'
+printf 'Coding world resolves; Agent, Host, and Session WIT mirrors match Core.\n'

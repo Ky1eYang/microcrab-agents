@@ -66,6 +66,7 @@ pub fn build(b: *std.Build) void {
         probe_step.dependOn(check);
     }
 
+    const check_component = b.step("check-component", "Validate the opt-in Zig Coding Component without installing it");
     const component = b.step("component", "Build the opt-in Zig Coding Component without staging it");
     const guest_source = b.option([]const u8, "coding-guest", "Override the Coding guest source for an isolated fixture");
     if (core != null) {
@@ -73,11 +74,13 @@ pub fn build(b: *std.Build) void {
         const wasm = freestanding(b, "coding", source);
         addCodingAbi(b, wasm);
         const packaging = addCodingComponent(b, check, wasm);
+        check_component.dependOn(packaging.verified);
         // Explicit build output only; never selected by the default or install step.
         const output = b.addInstallFile(packaging.artifact, "coding.component.wasm");
         output.step.dependOn(packaging.verified);
         component.dependOn(&output.step);
     } else {
+        check_component.makeFn = requireCore;
         component.makeFn = requireCore;
     }
 }
@@ -103,7 +106,7 @@ fn addCodingComponent(b: *std.Build, check: *std.Build.Step, wasm: *std.Build.St
     // Zig 0.13 hashes a directory argument's path, not its contents. Make a
     // content-addressed WIT input tree so any changed mirror invalidates embed.
     const wit = b.addWriteFiles();
-    for ([_][]const u8{ "world.wit", "deps/agent/agent.wit", "deps/host/host.wit" }) |file| {
+    for ([_][]const u8{ "world.wit", "deps/agent/agent.wit", "deps/host/host.wit", "deps/session-scoped/scoped-variables.wit" }) |file| {
         _ = wit.addCopyFile(b.path(b.fmt("wit/{s}", .{file})), file);
     }
     wit.step.dependOn(check);

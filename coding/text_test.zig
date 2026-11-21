@@ -10,6 +10,8 @@ const lower = "ab" ** 32;
 const upper = "AB" ** 32;
 const written = "cd" ** 32;
 const max = std.math.maxInt(u64);
+const build: types.CallFacts = .{ .session_id = "session-a", .admitted_mode = "build", .observed_at_unix_ms = 1000 };
+const plan: types.CallFacts = .{ .session_id = "session-a", .admitted_mode = "plan", .observed_at_unix_ms = 1000 };
 const Event = enum { read, glob, grep, capture, write };
 
 const Fixture = struct {
@@ -33,6 +35,10 @@ const Fixture = struct {
     }
 
     fn run(self: *Fixture, scratch: Allocator, name: []const u8, args: []const u8) Result([]const u8, types.ToolFailure) {
+        return self.runWith(scratch, name, args, build);
+    }
+
+    fn runWith(self: *Fixture, scratch: Allocator, name: []const u8, args: []const u8, facts: ?types.CallFacts) Result([]const u8, types.ToolFailure) {
         // Run via an injected Host value with the same interface namespaces as
         // abi.host. Only observations on this in-memory fixture are possible.
         return text.invoke(scratch, name, args, .{
@@ -41,7 +47,7 @@ const Fixture = struct {
             .cache_points = Cache{ .fixture = self },
             .glob = Glob{ .fixture = self },
             .grep = Grep{ .fixture = self },
-        });
+        }, facts);
     }
 };
 const Reader = struct {
@@ -318,6 +324,145 @@ test "literal replacement detects overlaps before ambiguity, including Unicode a
     const long = try ws.replace(s, "ABCABCD ABCDABCD", "ABCDABCD", "X", false, &output);
     try testing.expectEqual(@as(usize, 1), long.ok);
     try testing.expectEqualStrings("ABCABCD X", output.items);
+}
+
+test "PLAN requires valid admitted write/edit facts and an exact recognized mode" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const s = arena.allocator();
+    var host: Fixture = .{};
+    _ = try expectFailure("denied", host.runWith(s, "write", "{}", null));
+    _ = try expectFailure("denied", host.runWith(s, "edit", "{}", null));
+    var bad = build;
+    for ([_][]const u8{ "", "a\n", "a" ** 257 }) |id| {
+        bad.session_id = id;
+        const failure = try expectFailure("failed", host.runWith(s, "write", "{}", bad));
+        try testing.expectEqualStrings("InvalidInvocationSession", failure.message);
+    }
+    bad = plan;
+    bad.admitted_mode = "PLAN";
+    const failure = try expectFailure("failed", host.runWith(s, "edit", "{}", bad));
+    try testing.expectEqualStrings("UnknownInvocationMode", failure.message);
+    try testing.expectEqual(@as(usize, 0), host.events.len);
+
+    var unselected = plan;
+    unselected.admitted_mode = null;
+    try testing.expect(host.runWith(s, "write", try writeArgs(s, "file.txt", "plain"), unselected) == .ok);
+    try testing.expectEqualStrings("plain", host.write_request.?.content);
+}
+
+const plan_body = "```\r\n# Code, not title\r\n```\r\n# 修复 \"A\" \\ ###\r\n\r\nFirst: line\r\nsecond line.\r\n\r\nIgnore me.\r\n---\r\n";
+const plan_prefix = "---\ntitle: \"修复 \\\"A\\\" \\\\\"\ndescription: \"First: line second line.\"\nsession_id: \"session-a\"\n";
+const plan_file = plan_prefix ++ "edited_at_unix_ms: \"1000\"\n---\n" ++ plan_body;
+
+fn writeArgs(s: Allocator, path: []const u8, body: []const u8) ![]const u8 {
+    return std.json.stringifyAlloc(s, .{ .path = path, .content = body }, .{});
+}
+
+fn editArgs(s: Allocator, path: []const u8, old: []const u8, new: []const u8) ![]const u8 {
+    return std.json.stringifyAlloc(s, .{ .path = path, .expected_version = upper, .old_string = old, .new_string = new }, .{});
+}
+
+test "PLAN write generates bounded YAML scalars, preserves body and uses one atomic create" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const s = arena.allocator();
+    var host: Fixture = .{};
+    host.write.bytes = plan_file.len;
+    const args = try writeArgs(s, "plans/design.md", plan_body);
+    try expectOk(try std.fmt.allocPrint(s, "{{\"version\":\"{s}\",\"bytes\":{d}}}", .{ written, plan_file.len }), host.runWith(s, "write", args, plan));
+    try testing.expectEqualSlices(Event, &.{ .capture, .write, .capture }, host.events.constSlice());
+    try testing.expectEqualDeep(types.WriteRequest{ .path = "plans/design.md", .content = plan_file, .precondition = .missing }, host.write_request.?);
+
+    host = .{ .fail_event = 2, .failure = .{ .code = .conflict, .message = "exists" } };
+    _ = try expectFailure("conflict", host.runWith(s, "write", args, plan));
+    try testing.expectEqualSlices(Event, &.{ .capture, .write }, host.events.constSlice());
+
+    host = .{};
+    try testing.expect(host.runWith(s, "write", try writeArgs(s, "dir\\fallback.md", "Description 🦀\u{85}\u{2028}."), plan) == .ok);
+    try testing.expectEqualStrings("---\ntitle: \"fallback\"\ndescription: \"Description 🦀\\u0085\\u2028.\"\nsession_id: \"session-a\"\nedited_at_unix_ms: \"1000\"\n---\nDescription 🦀\u{85}\u{2028}.", host.write_request.?.content);
+
+    host = .{};
+    const long_body = "# " ++ ("a" ** 159) ++ "🦀\n\n" ++ ("b" ** 511) ++ "🦀\n";
+    try testing.expect(host.runWith(s, "write", try writeArgs(s, "bounds.md", long_body), plan) == .ok);
+    try testing.expectEqualStrings("---\ntitle: \"" ++ ("a" ** 159) ++ "\"\ndescription: \"" ++ ("b" ** 511) ++ "\"\nsession_id: \"session-a\"\nedited_at_unix_ms: \"1000\"\n---\n" ++ long_body, host.write_request.?.content);
+}
+
+test "PLAN write rejects supplied frontmatter, non-Markdown actual paths and versioned writes before effects" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const s = arena.allocator();
+    var host: Fixture = .{};
+    for ([_][]const u8{ "file.MD", "file.txt", "file.md\n", "file.md/target" }) |path| {
+        _ = try expectFailure("denied", host.runWith(s, "write", try writeArgs(s, path, "Body"), plan));
+    }
+    for ([_][]const u8{ plan_file, "\xef\xbb\xbf\r\n \t---\r\n", "---malformed\nbody", "%YAML 1.2\n---\n", "...\n" }) |body| {
+        _ = try expectFailure("invalid_request", host.runWith(s, "write", try writeArgs(s, "file.md", body), plan));
+    }
+    _ = try expectFailure("denied", host.runWith(s, "write", "{\"path\":\"file.md\",\"content\":\"\",\"expected_version\":\"" ++ upper ++ "\"}", plan));
+    _ = try expectFailure("invalid_request", host.runWith(s, "write", "{\"path\":\"file.md\",\"content\":\"\",\"expected_version\":null}", plan));
+    _ = try expectFailure("invalid_request", host.runWith(s, "write", try writeArgs(s, "file.md", "x\n" ** 10_000), plan));
+    try testing.expectEqual(@as(usize, 0), host.events.len);
+}
+
+test "PLAN edit changes only the body and timestamp with cache points and full-file CAS" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const s = arena.allocator();
+    var host: Fixture = .{};
+    host.read.content = plan_file;
+    host.read.version = upper;
+    var later = plan;
+    later.observed_at_unix_ms = 2000;
+    const path = "plans/design.md";
+    const args = try editArgs(s, path, "First: line", "Updated: line");
+    const body = try std.mem.replaceOwned(u8, s, plan_body, "First: line", "Updated: line");
+    const expected = try std.mem.concat(s, u8, &.{ plan_prefix, "edited_at_unix_ms: \"2000\"\n---\n", body });
+    host.write.bytes = expected.len;
+    try testing.expect(host.runWith(s, "edit", args, later) == .ok);
+    try testing.expectEqualSlices(Event, &.{ .read, .capture, .write, .capture }, host.events.constSlice());
+    try testing.expectEqualDeep(types.WriteRequest{ .path = path, .content = expected, .precondition = .{ .version = upper } }, host.write_request.?);
+
+    host = .{};
+    host.read.content = plan_file;
+    const noop = host.runWith(s, "edit", try editArgs(s, path, "line.", "line."), later);
+    try expectOk(try std.fmt.allocPrint(s, "{{\"version\":\"{s}\",\"bytes\":{d},\"changed\":false,\"replacement_counts\":[1]}}", .{ lower, plan_file.len }), noop);
+    try testing.expectEqualSlices(Event, &.{.read}, host.events.constSlice());
+
+    host = .{ .fail_event = 3, .failure = .{ .code = .conflict, .message = "external version changed" } };
+    host.read.content = plan_file;
+    _ = try expectFailure("conflict", host.runWith(s, "edit", args, later));
+    try testing.expectEqualSlices(Event, &.{ .read, .capture, .write }, host.events.constSlice());
+}
+
+test "PLAN edit rejects foreign and malformed files and cannot target or inject metadata" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const s = arena.allocator();
+    const path = "amend.md";
+    const args = try editArgs(s, path, "First: line", "Replacement");
+    for ([_][]const u8{
+        plan_body,
+        try std.mem.replaceOwned(u8, s, plan_file, "session-a", "session-b"),
+        try std.mem.replaceOwned(u8, s, plan_file, "session_id:", "title: \"Duplicate\"\nsession_id:"),
+        try std.mem.replaceOwned(u8, s, plan_file, "\"1000\"", "1000"),
+        try std.mem.replaceOwned(u8, s, plan_file, "\"1000\"", "\"01000\""),
+        try std.mem.replaceOwned(u8, s, plan_file, "\n```", "\n---\ntitle: \"extra\"\n---\n```"),
+    }) |content| {
+        var host: Fixture = .{};
+        host.read.content = content;
+        _ = try expectFailure("denied", host.runWith(s, "edit", args, plan));
+        try testing.expectEqualSlices(Event, &.{.read}, host.events.constSlice());
+    }
+    var host: Fixture = .{};
+    host.read.content = plan_file;
+    _ = try expectFailure("denied", host.runWith(s, "edit", try editArgs(s, "amend.txt", "First: line", "replacement"), plan));
+    try testing.expectEqual(@as(usize, 0), host.events.len);
+    _ = try expectFailure("invalid_request", host.runWith(s, "edit", try editArgs(s, path, "session-a", "session-b"), plan));
+    try testing.expectEqualSlices(Event, &.{.read}, host.events.constSlice());
+    host.events.len = 0;
+    _ = try expectFailure("invalid_request", host.runWith(s, "edit", try editArgs(s, path, plan_body, "---\ntitle: \"extra\"\n---\n"), plan));
+    try testing.expectEqualSlices(Event, &.{.read}, host.events.constSlice());
 }
 
 test "output budgets reject oversized Host replies and replacement expansion before allocation" {

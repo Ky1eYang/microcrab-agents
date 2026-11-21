@@ -49,6 +49,35 @@ pub const CommunicationError = struct {
     message: []const u8,
 };
 
+pub const Visibility = enum { visible, invisible, secret };
+pub const Persistence = enum { persisted, ephemeral };
+pub const Role = enum { runtime, client, agent };
+pub const VariableEntry = struct { name: []const u8, value_json: []const u8 };
+pub const MetadataEntry = struct {
+    name: []const u8,
+    visibility: Visibility,
+    persistence: Persistence,
+    owner: Role,
+    editors: []const Role,
+};
+pub const ScopedEntry = struct {
+    name: []const u8,
+    value_json: []const u8,
+    visibility: Visibility,
+    persistence: Persistence,
+    editors: ?[]const Role,
+};
+pub const VariableChangeSet = struct {
+    set: []const VariableEntry,
+    remove: []const []const u8,
+    scoped_set: []const ScopedEntry,
+};
+pub const CallFacts = struct {
+    session_id: []const u8,
+    admitted_mode: ?[]const u8,
+    observed_at_unix_ms: u64,
+};
+
 pub const OperationError = struct {
     code: enum { denied, invalid_request, unsupported, conflict, limit, cancelled, timeout, io },
     message: []const u8,

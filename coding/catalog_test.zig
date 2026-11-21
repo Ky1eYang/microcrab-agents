@@ -28,24 +28,51 @@ fn equal(a: Value, b: Value) bool {
     };
 }
 
-test "Rust catalog parity except the approved plan shell Ask" {
+fn rewriteAction(rule: *Value, from: []const u8, to: []const u8) !void {
+    try std.testing.expectEqualStrings(from, rule.object.get("action").?.string);
+    try rule.object.put("action", .{ .string = to });
+}
+
+fn argRule(a: std.mem.Allocator, original: Value, action: []const u8, pointer: []const u8, pattern: []const u8) !Value {
+    const source = try std.json.stringifyAlloc(a, .{ .action = action, .args = .{.{ .pointer = pointer, .matcher = .{ .kind = "regex", .value = pattern } }} }, .{});
+    var rule = try std.json.parseFromSliceLeaky(Value, a, source, .{});
+    for ([_][]const u8{ "agent", "mode", "tool" }) |key| try rule.object.put(key, original.object.get(key).?);
+    return rule;
+}
+
+test "Rust catalog parity except the approved PLAN specialization" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const Case = struct { name: []const u8, host: catalog.HostInfo, catalog: Value };
     const cases = try std.json.parseFromSliceLeaky([]Case, a, @embedFile("fixtures/rust-v0_1_20.json"), .{ .max_value_len = 4096 });
     for (cases) |case| {
-        if (case.host.shellName()) |name| {
-            const modes = case.catalog.array.items[0].object.get("modes").?.array.items;
-            const plan = modes[0].object.get("permissions").?.array.items;
-            for (plan) |*rule| {
-                const tool = rule.object.get("tool").?.object.get("value").?.string;
-                if (std.mem.eql(u8, name, tool)) {
-                    try std.testing.expectEqualStrings("deny", rule.object.get("action").?.string);
-                    try rule.object.put("action", .{ .string = "ask" });
-                }
+        const agent = &case.catalog.array.items[0];
+        const plan = &agent.object.getPtr("modes").?.array.items[0];
+        try std.testing.expectEqualStrings("plan", plan.object.get("name").?.string);
+        try plan.object.put("prompt", .{ .string = "Inspect relevant files, identify constraints and explain a concrete plan. Use read and search tools. To save a plan, write a new .md file with Markdown body only and omit expected_version; Coding adds the plan metadata. To revise a plan from this Session, read its version and edit only its Markdown body. Request a mode switch before implementing changes; Runtime remains the permission authority." });
+        const vars = agent.object.getPtr("variables").?;
+        for (vars.object.getPtr("rules").?.array.items) |*rule| {
+            if (std.mem.eql(u8, "plan_first", rule.object.get("name").?.string)) {
+                try rule.object.put("description", .{ .string = "Inspect relevant code and form a concrete plan before implementation. In plan mode, use read/search and save or revise plans as Markdown. Runtime is the sole permission authority; never treat a tool schema or mode recommendation as approval." });
             }
         }
+        const original = plan.object.get("permissions").?.array.items;
+        var expected = std.json.Array.init(a);
+        for (original) |original_rule| {
+            var rule = original_rule;
+            const tool = rule.object.get("tool").?.object.get("value").?.string;
+            const actual_shell = if (case.host.shellName()) |name| std.mem.eql(u8, name, tool) else false;
+            if (actual_shell or std.mem.eql(u8, "patch", tool)) try rewriteAction(&rule, "deny", "ask");
+            try expected.append(rule);
+            const write = std.mem.eql(u8, "write", tool);
+            if (write or std.mem.eql(u8, "edit", tool)) {
+                try std.testing.expectEqualStrings("deny", rule.object.get("action").?.string);
+                try expected.append(try argRule(a, rule, "allow", "/path", "(?s:.*)\\.md"));
+                if (write) try expected.append(try argRule(a, rule, "deny", "/expected_version", "(?s:.*)"));
+            }
+        }
+        try plan.object.put("permissions", .{ .array = expected });
         const actual = try catalog.describe(a, case.host);
         const decoded = try std.json.parseFromSliceLeaky(Value, a, actual, .{ .max_value_len = 4096 });
         if (!equal(case.catalog, decoded)) std.debug.print("catalog differs for {s}\n", .{case.name});

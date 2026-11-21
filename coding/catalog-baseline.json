@@ -4,7 +4,7 @@
     {
       "name": "plan",
       "description": "Inspect code and prepare an implementation plan.",
-      "prompt": "Inspect relevant files, identify constraints and explain a concrete plan. Use read and search tools. Request a mode switch before implementing changes; Runtime remains the permission authority.",
+      "prompt": "Inspect relevant files, identify constraints and explain a concrete plan. Use read and search tools. To save a plan, write a new .md file with Markdown body only and omit expected_version; Coding adds the plan metadata. To revise a plan from this Session, read its version and edit only its Markdown body. Request a mode switch before implementing changes; Runtime remains the permission authority.",
       "role": "main_agent"
     },
     {
@@ -386,7 +386,7 @@
     "rules": [
       {
         "name": "plan_first",
-        "description": "Inspect relevant code and form a concrete plan before implementation. Plan mode recommends read/search only. Runtime is the sole permission authority; never treat a tool schema or mode recommendation as approval."
+        "description": "Inspect relevant code and form a concrete plan before implementation. In plan mode, use read/search and save or revise plans as Markdown. Runtime is the sole permission authority; never treat a tool schema or mode recommendation as approval."
       },
       {
         "name": "safe_edits",

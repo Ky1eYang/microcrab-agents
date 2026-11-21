@@ -90,3 +90,12 @@ test "wasm32 layouts are independent of the compiling target and Zig niche layou
     try expect(types.ReadOutput, 48, 8);
     try expect(types.MutationOutput, 40, 8);
 }
+
+test "Session records align options, enums and the full-width observed time" {
+    try expect(types.VariableEntry, 16, 4);
+    try expect(types.MetadataEntry, 20, 4);
+    try expect(types.ScopedEntry, 32, 4);
+    try expect(types.VariableChangeSet, 24, 4);
+    try expect(types.CallFacts, 32, 8);
+    try expect(types.Result(types.CallFacts, types.CommunicationError), 40, 8);
+}
