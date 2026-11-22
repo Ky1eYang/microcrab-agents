@@ -52,13 +52,13 @@ pub fn build(b: *std.Build) void {
     }
 
     const guest = freestanding(b, "coding", b.path("src/main.zig"));
-    addCodingAbi(guest, coding_abi, memory);
+    addCodingAbi(guest, coding_abi);
     const vendored = addCodingComponent(b, addWitTree(b, null), guest);
     const vendored_check = b.step("check-vendored-component", "Verify the included Coding Component against vendored WIT only");
     vendored_check.dependOn(vendored.verified);
 
     const probe = freestanding(b, "coding-abi-probe", b.path("tests/abi_probe.zig"));
-    addCodingAbi(probe, coding_abi, memory);
+    addCodingAbi(probe, coding_abi);
     const wire = b.addSystemCommand(&.{"node"});
     wire.addFileArg(b.path("tools/test-coding-abi.mjs"));
     wire.addFileArg(probe.getEmittedBin());
@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
 
         const selected = if (guest_source) |path| blk: {
             const wasm = freestanding(b, "coding", .{ .cwd_relative = path });
-            addCodingAbi(wasm, coding_abi, memory);
+            addCodingAbi(wasm, coding_abi);
             break :blk wasm;
         } else guest;
         const packaging = addCodingComponent(b, wit, selected);
@@ -156,12 +156,7 @@ fn addCodingComponent(
     return .{ .artifact = artifact, .verified = &targets.step };
 }
 
-fn addCodingAbi(
-    wasm: *std.Build.Step.Compile,
-    coding_abi: *std.Build.Module,
-    memory: *std.Build.Module,
-) void {
-    wasm.root_module.addImport("wasm_abi", memory);
+fn addCodingAbi(wasm: *std.Build.Step.Compile, coding_abi: *std.Build.Module) void {
     wasm.root_module.addImport("coding_abi", coding_abi);
     wasm.root_module.export_symbol_names = &.{
         "cabi_realloc",   "init",               "describe",         "invoke",          "drive",
