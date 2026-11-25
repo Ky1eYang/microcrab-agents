@@ -453,6 +453,7 @@ pub fn describe(alloc: Allocator) ![]const u8 {
             .hints = [_]struct { name: []const u8, description: []const u8 }{
                 .{ .name = "Browser connection and Buffered output", .description = "Use connect_id from the initial Buffered output for Browser tools, and the separate Job handle for Job actions. Use Job.read with the Job handle to read later Buffered output, including network summaries and loss markers. Network capture is off by default; read_network_detail can retrieve the matching URL or eligible text body. Cancel the Job to disconnect and release it after cleanup." },
                 .{ .name = "Browser screenshot transport limits", .description = "The transport is bounded. Capture the smallest region that answers the question, or lower the scale and JPEG quality. Avoid full-viewport high-quality screenshots when possible." },
+                .{ .name = "Reading JSON or API responses", .description = "For native JSON pages or API responses that lack semantic DOM structure, prefer configure_connection (with url_prefix and body_url_prefix) before navigate/reload, read the record_id from Job.read, and call read_network_detail with include_body=true. Always wait_for(document_ready) before calling execute_js after navigate." },
             },
         },
     }}, .{ .emit_null_optional_fields = false });
