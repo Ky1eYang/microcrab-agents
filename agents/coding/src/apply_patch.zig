@@ -19,16 +19,19 @@ pub const Result = t.Result([]const u8, t.ToolFailure);
 
 const ImportedHost = struct {
     fn read(_: @This(), scratch: Allocator, request: t.ReadRequest) t.Result(t.ReadOutput, t.OperationError) {
-        return abi.host.text_read.read(scratch, request);
+        return switch (abi.host.file_versions.read(scratch, request)) {
+            .ok => |observed| .{ .ok = observed.page },
+            .err => |err| .{ .err = err },
+        };
     }
     fn preflight(_: @This(), scratch: Allocator, requests: []const t.FileMutation) t.Result([]const t.FileMutation, t.OperationError) {
-        return abi.host.file_mutation.preflight(scratch, requests);
+        return abi.host.file_versions.preflight(scratch, requests);
     }
     fn capture(_: @This(), scratch: Allocator, path: []const u8, max_bytes: u64) t.Result(void, t.OperationError) {
         return abi.host.cache_points.capture(scratch, path, max_bytes);
     }
     fn mutate(_: @This(), scratch: Allocator, request: t.FileMutation) t.Result(t.MutationOutput, t.OperationError) {
-        return abi.host.file_mutation.mutate(scratch, request);
+        return abi.host.file_versions.mutate(scratch, request);
     }
 };
 

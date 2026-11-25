@@ -53,7 +53,10 @@ pub fn drive(scratch: Scratch, buffer: types.BorrowedBuffer, state: []const u8, 
 }
 
 fn runBuffer(scratch: Scratch, info: []const u8, state: []const u8) types.InvokeResult {
-    var buffer = switch (execution.create(scratch, &.{ "stdout", "stderr" })) {
+    var buffer = switch (execution.create(scratch, &.{
+        types.OutputChannel.text("stdout"),
+        .{ .name = "fixture-bytes", .kind = .{ .bytes = "image/png" } },
+    })) {
         .ok => |output| output,
         .err => |failure| return .{ .err = failure },
     };
@@ -71,33 +74,35 @@ fn runBuffer(scratch: Scratch, info: []const u8, state: []const u8) types.Invoke
         return .{ .err = .{ .kind = .failed, .code = "drop", .message = info, .retryable = false } };
     }
     verify(execution.finish(scratch, borrow, null));
-    verify(execution.attachProcess(scratch, borrow, .{ .id = 0x1_0000_0007, .pid = 42 }, true));
-    verify(execution.retainProcess(scratch, borrow, .{ .id = 0x1_0000_0008, .pid = null }, false));
+    verify(execution.attachProcess(scratch, borrow, .{ .id = 0x1_0000_0007, .pid = 42 }, .raw_pipes));
+    verify(execution.retainProcess(scratch, borrow, .{ .id = 0x1_0000_0008, .pid = null }, .shell_text));
     verify(execution.attachGuest(scratch, borrow, state));
     return .{ .ok = .{ .buffered = .{ .output = buffer.take(), .include_initial = true } } };
 }
 
 fn runHost(scratch: Scratch, path: []const u8) types.InvokeResult {
-    const read = verify(host.text_read.read(scratch, .{
+    const observed = verify(host.file_versions.read(scratch, .{
         .path = path,
         .offset_line = 0x1_0000_0002,
         .max_lines = 3,
         .max_bytes = 4,
     }));
+    check(std.mem.eql(u8, observed.reference, "fv_0123456789abcdef"));
+    const read = observed.page;
     check(read.start_line == 3 and read.next_line == 0x1_0000_0003 and read.truncated);
     check(std.mem.eql(u8, read.version, "v1"));
     const write: types.WriteRequest = .{ .path = path, .content = read.content, .precondition = .{ .version = read.version } };
-    const receipt = verify(host.text_write.write(scratch, write));
+    const receipt = verify(host.file_versions.write(scratch, write));
     check(receipt.bytes == 0x1_0000_0004 and std.mem.eql(u8, receipt.version, "v2"));
     const missing: types.WriteRequest = .{ .path = path, .content = "", .precondition = .{ .missing = {} } };
-    const mutations = verify(host.file_mutation.preflight(scratch, &.{
+    const mutations = verify(host.file_versions.preflight(scratch, &.{
         .{ .write = missing },
         .{ .delete = .{ .path = path, .expected_version = "v2" } },
         .{ .move = .{ .path = path, .destination = "dest", .expected_version = "v3", .content = "moved" } },
     }));
     check(mutations.len == 3);
     for (mutations) |mutation| {
-        const applied = verify(host.file_mutation.mutate(scratch, mutation));
+        const applied = verify(host.file_versions.mutate(scratch, mutation));
         check(applied.version == null and applied.bytes == 17 and !applied.source_removed);
         check(applied.destination_written and std.mem.eql(u8, applied.diagnostic.?, "partial"));
     }
@@ -105,7 +110,7 @@ fn runHost(scratch: Scratch, path: []const u8) types.InvokeResult {
         .ok => @trap(),
         .err => |failure| check(failure.code == .conflict and std.mem.eql(u8, failure.message, "cache conflict")),
     }
-    const globs = verify(host.glob.glob(scratch, .{
+    const globs = verify(host.glob_ignore.globFromState(scratch, .{
         .root = path,
         .pattern = "*",
         .include_hidden = true,
@@ -127,12 +132,6 @@ fn runHost(scratch: Scratch, path: []const u8) types.InvokeResult {
     check(matches.matches.len == 1 and !matches.truncated);
     check(matches.matches[0].line == 0x1_0000_0006);
     check(std.mem.eql(u8, matches.matches[0].text, "found"));
-    const meta = verify(host.filesystem.stat(scratch, path));
-    check(meta.kind == .file and meta.size == 13 and meta.modified_ms == 0x1_0000_0007);
-    const file = verify(host.filesystem.openRead(scratch, path));
-    const bytes = verify(host.filesystem.read(scratch, file, 2, 10));
-    check(std.mem.eql(u8, bytes, "\xff\x00"));
-    verify(host.filesystem.close(scratch, file));
     const process = verify(host.shell.launch(scratch, .{ .command = "test", .cwd = path }));
     check(process.id == 0x1_0000_0008 and process.pid == null);
     const status = verify(host.process.status(scratch, process));
@@ -152,7 +151,7 @@ fn runHost(scratch: Scratch, path: []const u8) types.InvokeResult {
 }
 
 fn runBulk(scratch: Scratch, path: []const u8) types.InvokeResult {
-    const result = verify(host.glob.glob(scratch, .{
+    const result = verify(host.glob_ignore.globFromState(scratch, .{
         .root = path,
         .pattern = "*",
         .include_hidden = false,

@@ -1,7 +1,7 @@
 //! Run the Host's linked shell; the catalog and Runtime own authority and cleanup.
 const std = @import("std");
 const abi = @import("coding_abi");
-const support = @import("media_shell_support.zig");
+const support = @import("shell_support.zig");
 const types = abi.types;
 const Allocator = std.mem.Allocator;
 
@@ -69,7 +69,7 @@ pub fn invokeWith(scratch: Allocator, arguments: []const u8, reserved: *types.Ow
         const buffer = reserved.borrow();
         if (appendOutput(scratch, calls.execution, buffer, output, output.truncated)) |failure| return .{ .err = failure };
         const state = encodeState(scratch, handle, output.truncated) catch return .{ .err = support.allocationFailed() };
-        switch (calls.execution.retainProcess(scratch, buffer, handle, true)) {
+        switch (calls.execution.retainProcess(scratch, buffer, handle, .shell_text)) {
             .ok => {},
             .err => |failure| return .{ .err = failure },
         }

@@ -5,7 +5,7 @@ const types = @import("types.zig");
 const codec = @import("codec.zig");
 const wire = @import("imports.zig");
 
-/// Export the Agent 0.8 core signatures plus its canonical post-return functions.
+/// Export the Agent 0.9 core signatures plus its canonical post-return functions.
 pub fn exportAgent(comptime Guest: type) void {
     _ = memory.cabi_realloc;
     const Entry = struct {

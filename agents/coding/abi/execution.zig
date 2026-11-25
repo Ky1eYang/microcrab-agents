@@ -5,13 +5,13 @@ const wire = @import("imports.zig");
 const codec = @import("codec.zig");
 const host = @import("host.zig");
 const Scratch = std.mem.Allocator;
-const module = "microcrab:agent/execution@0.8.0";
+const module = "microcrab:agent/execution@0.9.0";
 const Status = types.Result(void, types.ToolFailure);
 
-pub fn create(scratch: Scratch, channels: []const []const u8) types.Result(types.OwnedBuffer, types.ToolFailure) {
+pub fn create(scratch: Scratch, channels: []const types.OutputChannel) types.Result(types.OwnedBuffer, types.ToolFailure) {
     const raw = wire.function(fn (u32, u32, u32) callconv(.C) void, module, "create");
     var pair: [8]u8 = undefined;
-    codec.lowerScratch([]const []const u8, scratch, channels, &pair);
+    codec.lowerScratch([]const types.OutputChannel, scratch, channels, &pair);
     const address = std.mem.readInt(u32, pair[0..4], .little);
     return wire.call(types.Result(types.OwnedBuffer, types.ToolFailure), scratch, raw, .{ address, @as(u32, channels.len) });
 }
@@ -47,12 +47,12 @@ pub fn finish(scratch: Scratch, buffer: types.BorrowedBuffer, failure: ?types.To
     return wire.call(Status, scratch, raw, args);
 }
 
-pub fn attachProcess(scratch: Scratch, buffer: types.BorrowedBuffer, process: types.ProcessHandle, captured: bool) Status {
-    return linkProcess(scratch, buffer, process, captured, "attach-process");
+pub fn attachProcess(scratch: Scratch, buffer: types.BorrowedBuffer, process: types.ProcessHandle, source: types.ProcessSource) Status {
+    return linkProcess(scratch, buffer, process, source, "attach-process");
 }
 
-pub fn retainProcess(scratch: Scratch, buffer: types.BorrowedBuffer, process: types.ProcessHandle, captured: bool) Status {
-    return linkProcess(scratch, buffer, process, captured, "retain-process");
+pub fn retainProcess(scratch: Scratch, buffer: types.BorrowedBuffer, process: types.ProcessHandle, source: types.ProcessSource) Status {
+    return linkProcess(scratch, buffer, process, source, "retain-process");
 }
 
 pub fn attachGuest(scratch: Scratch, buffer: types.BorrowedBuffer, state: []const u8) Status {
@@ -60,7 +60,7 @@ pub fn attachGuest(scratch: Scratch, buffer: types.BorrowedBuffer, state: []cons
     return wire.call(Status, scratch, raw, .{buffer.index} ++ wire.slice(state));
 }
 
-fn linkProcess(scratch: Scratch, buffer: types.BorrowedBuffer, process: types.ProcessHandle, captured: bool, comptime name: []const u8) Status {
+fn linkProcess(scratch: Scratch, buffer: types.BorrowedBuffer, process: types.ProcessHandle, source: types.ProcessSource, comptime name: []const u8) Status {
     const raw = wire.function(fn (u32, u64, u32, u32, u32, u32) callconv(.C) void, module, name);
-    return wire.call(Status, scratch, raw, .{buffer.index} ++ host.processArgs(process) ++ .{@as(u32, @intFromBool(captured))});
+    return wire.call(Status, scratch, raw, .{buffer.index} ++ host.processArgs(process) ++ .{@as(u32, @intFromEnum(source))});
 }

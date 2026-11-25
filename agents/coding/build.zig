@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     tests.dependOn(&b.addRunArtifact(layout_tests).step);
-    for ([_][]const u8{ "catalog_test", "text_test", "apply_patch_test", "image_test", "shell_test" }) |name| {
+    for ([_][]const u8{ "catalog_test", "text_test", "apply_patch_test", "shell_test" }) |name| {
         const tool_test = b.addTest(.{
             .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
             .target = b.host,
@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
 
     const guest = freestanding(b, "coding", b.path("src/main.zig"));
     addCodingAbi(guest, coding_abi);
-    const vendored = addCodingComponent(b, addWitTree(b, null), guest);
+    const vendored = addCodingComponent(b, addWitTree(b, null, "wit/world.wit"), guest);
     const vendored_check = b.step("check-vendored-component", "Verify the included Coding Component against vendored WIT only");
     vendored_check.dependOn(vendored.verified);
 
@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
     const wire = b.addSystemCommand(&.{"node"});
     wire.addFileArg(b.path("tools/test-coding-abi.mjs"));
     wire.addFileArg(probe.getEmittedBin());
+    wire.addFileArg(guest.getEmittedBin());
     const probe_step = b.step("test-coding-abi", "Test Coding wire values and validate a test-only component");
     probe_step.dependOn(&wire.step);
     probe_step.dependOn(check);
@@ -71,7 +72,7 @@ pub fn build(b: *std.Build) void {
     check_component.dependOn(check);
     component.dependOn(check_component);
     if (core != null) {
-        const wit = addWitTree(b, check);
+        const wit = addWitTree(b, check, "wit/world.wit");
         const probe_packaging = addCodingComponent(b, wit, probe);
         probe_step.dependOn(probe_packaging.verified);
 
@@ -80,7 +81,8 @@ pub fn build(b: *std.Build) void {
             addCodingAbi(wasm, coding_abi);
             break :blk wasm;
         } else guest;
-        const packaging = addCodingComponent(b, wit, selected);
+        const selected_wit = if (guest_source != null) addWitTree(b, check, "tests/core_abi_probe.wit") else wit;
+        const packaging = addCodingComponent(b, selected_wit, selected);
         check_component.dependOn(packaging.verified);
         // Export the verified output to the aggregate without attaching it to install.
         const output = b.addNamedWriteFiles("component");
@@ -102,15 +104,16 @@ fn freestanding(b: *std.Build, name: []const u8, source: std.Build.LazyPath) *st
     return wasm;
 }
 
-fn addWitTree(b: *std.Build, check: ?*std.Build.Step) std.Build.LazyPath {
+fn addWitTree(b: *std.Build, check: ?*std.Build.Step, world: []const u8) std.Build.LazyPath {
     // Zig 0.13 hashes a directory argument's path, not its contents.
     const wit = b.addWriteFiles();
     if (check) |drift| wit.step.dependOn(drift);
+    _ = wit.addCopyFile(b.path(world), "world.wit");
     for ([_][]const u8{
-        "world.wit",
         "deps/agent/agent.wit",
         "deps/host/host.wit",
         "deps/session-scoped/scoped-variables.wit",
+        "deps/session-scoped/file-versions.wit",
     }) |file| {
         _ = wit.addCopyFile(b.path(b.fmt("wit/{s}", .{file})), file);
     }
@@ -149,7 +152,7 @@ fn addCodingComponent(
 
     const targets = b.addSystemCommand(&.{ "wasm-tools", "component", "targets" });
     targets.addDirectoryArg(wit);
-    targets.addArgs(&.{ "--world", "microcrab:coding/coding@0.1.0" });
+    targets.addArgs(&.{ "--world", "coding" });
     targets.addFileArg(artifact);
     targets.step.dependOn(&validate.step);
     targets.step.dependOn(&extract.step);

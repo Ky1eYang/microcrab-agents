@@ -1,0 +1,7 @@
+.{
+    .name = "microcrab-agent-browser",
+    .version = "0.5.1",
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{ .shared = .{ .path = "../../shared" } },
+    .paths = .{ "build.zig", "build.zig.zon", "README.md", "src", "tools", "wit" },
+}

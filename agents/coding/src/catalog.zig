@@ -44,17 +44,16 @@ pub const HostInfo = struct {
         for (name) |ch| {
             if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '-') return null;
         }
-        // Mirrors the predecessor. The Runtime independently reserves built-in names.
+        // Keep the removed tool name reserved so a Host shell cannot reintroduce it.
+        // The Runtime independently reserves built-in names.
         const reserved = [_][]const u8{ "read", "read_image", "write", "edit", "patch", "apply_patch", "switch_mode", "glob", "grep", "job", "delegate", "sleep", "expand" };
         for (reserved) |collision| if (eq(name, collision)) return null;
         return name;
     }
 
     pub fn offers(self: HostInfo, name: []const u8) bool {
-        if (eq(name, "read_image")) {
-            const links = [_][]const u8{ "filesystem.stat", "filesystem.open", "filesystem.read", "filesystem.close" };
-            for (links) |link| if (!self.linked(link)) return false;
-            return true;
+        if (eq(name, "read") or eq(name, "write") or eq(name, "edit") or eq(name, "patch") or eq(name, "apply_patch")) {
+            if (!self.linked("file_versions_v1")) return false;
         }
         if (eq(name, "edit") or eq(name, "patch")) return self.linked("read") and self.linked("write");
         if (eq(name, "apply_patch")) return self.linked("read") and self.linked("file_mutation");
@@ -81,14 +80,12 @@ const Tool = struct { name: []const u8, description: []const u8, parameters: Val
 const Rule = struct { name: []const u8, description: []const u8 };
 const Variables = struct { description: []const u8, rules: []const Rule, hints: []const Rule };
 const Role = enum { main_agent, both };
-const Media = struct { read_image: usize };
 const ModeBase = struct { name: []const u8, description: []const u8, prompt: []const u8, role: Role };
 const Shell = struct { descriptions: struct { unix: []const u8, windows: []const u8, other: []const u8 }, parameters: Value };
 const Baseline = struct {
     name: []const u8,
     modes: []const ModeBase,
     tools: []const Tool,
-    tool_media_output_bytes: Media,
     variables: Variables,
     shell: Shell,
 };
@@ -117,7 +114,6 @@ const Agent = struct {
     name: []const u8,
     modes: []const Mode,
     tools: []const Tool,
-    tool_media_output_bytes: ?Media,
     variables: Variables,
 };
 
@@ -142,7 +138,7 @@ pub fn describe(scratch: Allocator, host: HostInfo) ![]const u8 {
         var permissions = try std.ArrayList(Permission).initCapacity(scratch, tools.items.len + 3);
         for (tools.items) |tool| {
             const name = tool.name;
-            const read_only = eq(name, "read") or eq(name, "read_image") or eq(name, "glob") or eq(name, "grep");
+            const read_only = eq(name, "read") or eq(name, "glob") or eq(name, "grep");
             const actual_shell = if (shell) |actual| eq(name, actual) else false;
             const plan_mode = eq(mode.name, "plan");
             var rule: Permission = .{
@@ -178,7 +174,6 @@ pub fn describe(scratch: Allocator, host: HostInfo) ![]const u8 {
         .name = base.name,
         .modes = modes,
         .tools = tools.items,
-        .tool_media_output_bytes = if (host.offers("read_image")) base.tool_media_output_bytes else null,
         .variables = variables,
     };
     return std.json.stringifyAlloc(scratch, &[_]Agent{agent}, .{ .emit_null_optional_fields = false });

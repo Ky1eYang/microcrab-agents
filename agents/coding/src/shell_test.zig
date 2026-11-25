@@ -110,10 +110,10 @@ const Mock = struct {
         string(if (stdout) captured.stdout else captured.stderr, content) catch unreachable;
         return observe(ExecStatus, if (stdout) .stdout else .stderr) orelse .{ .ok = {} };
     }
-    pub fn retainProcess(_: Allocator, buffer: types.BorrowedBuffer, handle: types.ProcessHandle, capture: bool) ExecStatus {
+    pub fn retainProcess(_: Allocator, buffer: types.BorrowedBuffer, handle: types.ProcessHandle, source: types.ProcessSource) ExecStatus {
         borrowed(buffer);
         exact(handle);
-        expect(capture) catch unreachable;
+        equal(.shell_text, source) catch unreachable;
         return observe(ExecStatus, .retain) orelse .{ .ok = {} };
     }
     pub fn attachGuest(_: Allocator, buffer: types.BorrowedBuffer, state: []const u8) ExecStatus {

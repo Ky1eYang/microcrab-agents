@@ -16,7 +16,6 @@ let mutationCount = 0;
 let factsCount = 0;
 const dynamic = 0x100000000n;
 const buffer = 73;
-const file = dynamic + 9n;
 const processId = dynamic + 8n;
 const path = 'é/λ.txt';
 const text = 'current é\u0000';
@@ -60,7 +59,7 @@ function response(at, size, alignment, tag = 0) {
 }
 function mock(interfaceName, name, fn) {
     const [namespace, nameOfInterface] = interfaceName.includes('/') ? interfaceName.split('/') : ['host', interfaceName];
-    const version = { agent: '0.8.0', host: '0.1.0', session: '0.2.0' }[namespace];
+    const version = { agent: '0.9.0', host: '0.1.0', session: '0.2.0' }[namespace];
     const key = `microcrab:${namespace}/${nameOfInterface}@${version}`;
     (imports[key] ??= {})[name] = fn;
 }
@@ -83,7 +82,12 @@ mock('agent/host-info', 'host-info', at => {
 const execution = 'agent/execution';
 mock(execution, 'create', (ptr, count, at) => {
     assert.equal(count, 2);
-    assert.deepEqual([getText(ptr), getText(ptr + 8)], ['stdout', 'stderr']);
+    assert.equal(ptr % 4, 0);
+    assert.equal(getText(ptr), 'stdout');
+    assert.deepEqual([get8(ptr + 8), get32(ptr + 12), get32(ptr + 16)], [0, 0, 0]);
+    assert.equal(getText(ptr + 20), 'fixture-bytes');
+    assert.equal(get8(ptr + 28), 1);
+    assert.equal(getText(ptr + 32), 'image/png');
     put32(response(at, 28, 4), buffer);
 });
 mock(execution, 'append', (id, tag, channel, channelLen, content, contentLen, at) => {
@@ -103,12 +107,12 @@ mock(execution, 'finish', (id, tag, kind, code, codeLen, msg, msgLen, retryable,
     } else assert.deepEqual([kind, code, codeLen, msg, msgLen, retryable], [0, 0, 0, 0, 0, 0]);
     okVoid(at);
 });
-mock(execution, 'attach-process', (id, proc, tag, pid, captured, at) => {
-    assert.deepEqual([id, proc, tag, pid, captured], [buffer, dynamic + 7n, 1, 42, 1]);
+mock(execution, 'attach-process', (id, proc, tag, pid, source, at) => {
+    assert.deepEqual([id, proc, tag, pid, source], [buffer, dynamic + 7n, 1, 42, 0]);
     okVoid(at);
 });
-mock(execution, 'retain-process', (id, proc, tag, pid, captured, at) => {
-    assert.deepEqual([id, proc, tag, pid, captured], [buffer, processId, 0, 0, 0]);
+mock(execution, 'retain-process', (id, proc, tag, pid, source, at) => {
+    assert.deepEqual([id, proc, tag, pid, source], [buffer, processId, 0, 0, 1]);
     okVoid(at);
 });
 mock(execution, 'attach-guest', (id, ptr, len, at) => {
@@ -128,18 +132,19 @@ mock(execution, '[resource-drop]buffer', id => {
         borrowDropCount++;
     } else dropCount++;
 });
-mock('text-read', 'read', (ptr, len, offset, lines, max, at) => {
+mock('session/file-versions', 'read', (ptr, len, offset, lines, max, at) => {
     assert.equal(stringAt(ptr, len), path);
     assert.deepEqual([offset, lines, max], [dynamic + 2n, 3n, 4n]);
-    const out = response(at, 56, 8);
+    const out = response(at, 64, 8);
     writeList(out, text);
     put64(out + 8, 3n);
     put8(out + 16, 1);
     put64(out + 24, dynamic + 3n);
     put8(out + 32, 1);
     writeList(out + 36, 'v1');
+    writeList(out + 48, 'fv_0123456789abcdef');
 });
-mock('text-write', 'write', (ptr, len, content, contentLen, tag, pre, preLen, at) => {
+mock('session/file-versions', 'write', (ptr, len, content, contentLen, tag, pre, preLen, at) => {
     assert.equal(stringAt(ptr, len), path);
     assert.equal(stringAt(content, contentLen), text);
     assert.equal(tag, 1);
@@ -148,7 +153,7 @@ mock('text-write', 'write', (ptr, len, content, contentLen, tag, pre, preLen, at
     writeList(out, 'v2');
     put64(out + 8, dynamic + 4n);
 });
-mock('file-mutation', 'preflight', (ptr, len, at) => {
+mock('session/file-versions', 'preflight', (ptr, len, at) => {
     assert.equal(len, 3);
     assert.equal(get8(ptr), 0);
     assert.equal(getText(ptr + 4), path);
@@ -176,7 +181,7 @@ mock('file-mutation', 'preflight', (ptr, len, at) => {
         writeList(list + 76 + 8 * index, value);
     }
 });
-mock('file-mutation', 'mutate', (tag, p0, n0, p1, n1, p2, p3, p4, n4, at) => {
+mock('session/file-versions', 'mutate', (tag, p0, n0, p1, n1, p2, p3, p4, n4, at) => {
     mutationCount++;
     assert.equal(stringAt(p0, n0), path);
     if (tag === 0) {
@@ -206,7 +211,7 @@ mock('cache-points', 'capture', (ptr, len, max, at) => {
     assert.equal(max, 999n);
     opError(at, 3, 'cache conflict');
 });
-mock('glob', 'glob', (root, rootLen, pattern, patternLen, hidden, ignored, directories, max, at) => {
+mock('glob-ignore', 'glob-from-state', (root, rootLen, pattern, patternLen, hidden, ignored, directories, max, at) => {
     assert.equal(stringAt(root, rootLen), path);
     assert.equal(stringAt(pattern, patternLen), '*');
     if (max === 4096n) {
@@ -237,27 +242,6 @@ mock('grep', 'grep', (root, rootLen, pattern, patternLen, tag, glob, globLen, cs
     put64(list + 8, dynamic + 6n);
     writeList(list + 16, 'found');
     put8(out + 8, 0);
-});
-mock('filesystem', 'stat', (ptr, len, at) => {
-    assert.equal(stringAt(ptr, len), path);
-    const out = response(at, 40, 8);
-    put8(out, 0);
-    put64(out + 8, 13n);
-    put8(out + 16, 1);
-    put64(out + 24, dynamic + 7n);
-});
-mock('filesystem', 'open', (ptr, len, flags, at) => {
-    assert.equal(stringAt(ptr, len), path);
-    assert.equal(flags, 1);
-    put64(response(at, 24, 8), file);
-});
-mock('filesystem', 'read', (id, offset, len, at) => {
-    assert.deepEqual([id, offset, len], [file, 2n, 10]);
-    writeList(response(at, 16, 4), Uint8Array.of(0xff, 0));
-});
-mock('filesystem', 'close', (id, at) => {
-    assert.equal(id, file);
-    response(at, 16, 4);
 });
 mock('shell', 'launch', (command, len, tag, cwd, cwdLen, at) => {
     assert.equal(stringAt(command, len), 'test');
@@ -494,3 +478,130 @@ assert.ok(bulkMemoryHighWater < 64 * 1024 * 1024);
 for (let i = 0; i < 8; i++) runBulk();
 assert.equal(memory.buffer.byteLength, bulkMemoryHighWater);
 console.log('Coding ABI: 128 rounds including typed Session imports, and 4096-entry list lifting/reclamation passed.');
+
+// Exercise the production guest, not just the transport fixture. A fallback
+// to legacy glob would change the import set or hit an unexpected operation.
+const guest = new WebAssembly.Module(readFileSync(process.argv[3]));
+const guestImports = {};
+const ignore = 'microcrab:host/glob-ignore@0.1.0';
+const scoped = 'microcrab:session/variables@0.2.0';
+const hostInfo = 'microcrab:agent/host-info@0.9.0';
+const agentExecution = 'microcrab:agent/execution@0.9.0';
+for (const { module: namespace, name } of WebAssembly.Module.imports(guest)) {
+    assert.notEqual(namespace, 'microcrab:host/glob@0.1.0');
+    assert.notEqual(namespace, 'microcrab:host/text-read@0.1.0');
+    assert.notEqual(namespace, 'microcrab:host/text-write@0.1.0');
+    assert.notEqual(namespace, 'microcrab:host/file-mutation@0.1.0');
+    (guestImports[namespace] ??= {})[name] = () => assert.fail(`unexpected production import ${namespace}/${name}`);
+}
+const hostJson = JSON.stringify({ os_family: 'unix', os: 'linux', arch: 'x86_64', shell: 'bash',
+    path_separator: '/', newline: '\n', capabilities: ['glob'] });
+let snapshotReply;
+let changeRejected = false;
+let published;
+let snapshotCalls = 0;
+let stateGlobCalls = 0;
+let dropCalls = 0;
+assert.deepEqual(Object.keys(guestImports[ignore]).sort(), ['glob-ignored-paths', 'glob-with-ignored-paths']);
+Object.assign(guestImports[ignore], {
+    'glob-ignored-paths'(at) {
+        snapshotCalls++;
+        if (!Array.isArray(snapshotReply)) return opError(at, snapshotReply, 'private path /workspace/test');
+        const out = response(at, 16, 4);
+        if (snapshotReply.length === 0) {
+            put32(out, 0);
+            put32(out + 4, 0);
+        } else {
+            const list = listArea(out, 8, snapshotReply.length, 4);
+            snapshotReply.forEach((path, i) => writeList(list + 8 * i, path));
+        }
+    },
+    'glob-with-ignored-paths'(root, rootLen, pattern, patternLen, hidden, ignored, directories, max, paths, count, at) {
+        stateGlobCalls++;
+        assert.equal(stringAt(root, rootLen), 'root');
+        assert.equal(stringAt(pattern, patternLen), '*');
+        assert.deepEqual([hidden, ignored, directories, max], [0, 0, 0, 7n]);
+        if (count) assert.deepEqual(Array.from({ length: count }, (_, i) => getText(paths + 8 * i)), ['nested/', 'other.txt']);
+        const out = response(at, 32, 4);
+        const list = listArea(out, 12, 1, 4);
+        writeList(list, count === 0 ? 'bypassed.txt' : 'state-result.txt');
+        put8(out + 8, 0);
+        put8(out + 12, Number(count > 0));
+        if (count) {
+            put8(out + 16, 0); // entries
+            put32(out + 20, 16384);
+            put32(out + 24, 16385);
+        }
+    },
+});
+guestImports[scoped]['variable-change'] = (set, sets, remove, removes, entries, count, at) => {
+    assert.deepEqual([set, sets, remove, removes, count], [0, 0, 0, 0, 1]);
+    assert.equal(getText(entries), 'glob_ignored');
+    assert.deepEqual([get8(entries + 16), get8(entries + 17), get8(entries + 20)], [0, 0, 1]);
+    assert.deepEqual([...bytes(get32(entries + 24), get32(entries + 28))], [1]); // Client editor
+    if (changeRejected) return opError(at, 2, 'fixture refusal');
+    published = getText(entries + 8);
+    response(at, 16, 4);
+};
+guestImports[hostInfo]['host-info'] = at => writeList(response(at, 16, 4), hostJson);
+guestImports[agentExecution].create = (channels, count, at) => {
+    assert.equal(count, 3);
+    assert.equal(getText(channels), 'result');
+    put32(response(at, 28, 4), buffer);
+};
+guestImports[agentExecution]['[resource-drop]buffer'] = id => {
+    assert.equal(id, buffer);
+    dropCalls++;
+};
+const coding = new WebAssembly.Instance(guest, guestImports).exports;
+({ memory, cabi_realloc: realloc } = coding);
+
+for (const [reply, expected] of [
+    [['nested/', 'other.txt'], '["nested/","other.txt"]'],
+    [[], '[]'],
+    [4, '{"status":"incomplete","reason":"limit"}'],
+    [2, '{"status":"unavailable","reason":"unsupported"}'],
+]) {
+    snapshotReply = reply;
+    const result = coding.init();
+    assert.equal(get8(result), 0);
+    assert.equal(published, expected);
+    coding.cabi_post_init(result);
+}
+changeRejected = true;
+let result = coding.init();
+assert.equal(get8(result), 1);
+assert.equal(getText(result + 4), 'rejected');
+assert.equal(getText(result + 12), 'could not publish glob_ignored: fixture refusal');
+coding.cabi_post_init(result);
+assert.equal(snapshotCalls, 5);
+
+function glob(ignoredList) {
+    return coding.invoke(...alloc(hostJson), ...alloc('glob'), ...alloc(JSON.stringify({
+        root: 'root', pattern: '*', ignored_list: ignoredList, max_results: 7,
+    })));
+}
+for (const bad of [undefined, null, { status: 'incomplete' }, [[65]]]) {
+    result = glob(bad);
+    assert.equal(get8(result), 1);
+    assert.equal(getText(result + 8), 'invalid_request');
+    assert.match(getText(result + 16), /resolved ignored_list array/);
+    coding.cabi_post_invoke(result);
+}
+for (const [paths, file] of [[['nested/', 'other.txt'], 'state-result.txt'], [[], 'bypassed.txt']]) {
+    result = glob(paths);
+    assert.deepEqual([get8(result), get8(result + 4)], [0, 0]);
+    const output = JSON.parse(getText(result + 8));
+    assert.deepEqual(output.groups, [{ kind: 'file', path: [file] }]);
+    assert.equal(output.truncated, false);
+    if (paths.length === 0) assert.equal(output.scan_incomplete, undefined);
+    else assert.deepEqual(output.scan_incomplete, {
+        reason: 'entries', limit: 16384, observed: 16385,
+        guidance: 'Use a narrower root or a pattern starting with a literal directory prefix. No matches in the scanned portion does not prove absence.',
+    });
+    coding.cabi_post_invoke(result);
+}
+assert.equal(stateGlobCalls, 2);
+assert.equal(dropCalls, 6);
+assert.equal(snapshotCalls, 5, 'glob does not re-collect ignore paths');
+console.log('Coding production guest: resolved path init publication, atomic failures, strict path-list dispatch and separate scan diagnostics verified.');

@@ -1,0 +1,7 @@
+package microcrab:coding@0.4.0;
+
+/// Detached compatibility fixture; never used for production Coding.
+world coding {
+  include microcrab:agent/agent@0.9.0;
+  import microcrab:host/text-read@0.1.0;
+}

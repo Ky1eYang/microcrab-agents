@@ -91,6 +91,13 @@ test "wasm32 layouts are independent of the compiling target and Zig niche layou
     try expect(types.MutationOutput, 40, 8);
 }
 
+test "Agent channel records preserve the variant payload alignment and process source tag" {
+    try expect(types.ContentKind, 12, 4);
+    try expect(types.OutputChannel, 20, 4);
+    try expect(types.ProcessSource, 1, 1);
+    try std.testing.expectEqual(@as(u32, 4), payloadOffset(types.ContentKind));
+}
+
 test "Session records align options, enums and the full-width observed time" {
     try expect(types.VariableEntry, 16, 4);
     try expect(types.MetadataEntry, 20, 4);

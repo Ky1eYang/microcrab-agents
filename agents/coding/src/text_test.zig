@@ -19,7 +19,8 @@ const Fixture = struct {
     capture_paths: std.BoundedArray([]const u8, 2) = .{},
     captured_bytes: u64 = 0,
     read: types.ReadOutput = .{ .content = "", .start_line = 1, .next_line = null, .truncated = false, .version = lower },
-    glob: types.GlobOutput = .{ .entries = &.{}, .truncated = false },
+    glob: types.ResolvedGlobOutput = .{ .entries = &.{}, .truncated = false },
+    ignored_list: ?[]const []const u8 = null,
     grep: types.GrepOutput = .{ .matches = &.{}, .truncated = false },
     write: types.WriteOutput = .{ .version = written, .bytes = 0 },
     fail_event: ?usize = null,
@@ -45,7 +46,7 @@ const Fixture = struct {
             .text_read = Reader{ .fixture = self },
             .text_write = Writer{ .fixture = self },
             .cache_points = Cache{ .fixture = self },
-            .glob = Glob{ .fixture = self },
+            .glob_ignore = Glob{ .fixture = self },
             .grep = Grep{ .fixture = self },
         }, facts);
     }
@@ -84,8 +85,9 @@ const Cache = struct {
 };
 const Glob = struct {
     fixture: *Fixture,
-    pub fn glob(self: @This(), _: Allocator, request: types.GlobRequest) Result(types.GlobOutput, Op) {
+    pub fn globWithIgnoredPaths(self: @This(), _: Allocator, request: types.GlobRequest, paths: []const []const u8) Result(types.ResolvedGlobOutput, Op) {
         self.fixture.glob_request = request;
+        self.fixture.ignored_list = paths;
         if (self.fixture.note(.glob)) |err| return .{ .err = err };
         return .{ .ok = self.fixture.glob };
     }
@@ -146,10 +148,14 @@ test "glob groups Host order by kind; grep includes both view and verbatim match
     }, .truncated = true };
     try expectOk(
         \\{"groups":[{"kind":"file","path":["foo/z","foo/a 以下"]},{"kind":"directory","path":["dir 2"]},{"kind":"symlink","path":["links/s"]}],"truncated":true}
-    , host.run(s, "glob", "{\"root\":\".\",\"pattern\":\"**\",\"include_hidden\":true,\"include_directories\":true}"));
+    , host.run(s, "glob", "{\"root\":\".\",\"pattern\":\"**\",\"include_hidden\":true,\"include_directories\":true,\"ignored_list\":[\"nested/\",\"single.txt\"]}"));
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "nested/", "single.txt" }), host.ignored_list.?);
     try testing.expectEqualDeep(types.GlobRequest{ .root = ".", .pattern = "**", .include_hidden = true, .include_ignored = false, .include_directories = true, .max_results = 100 }, host.glob_request.?);
     host.glob.entries = &.{};
-    try expectOk("{\"groups\":[],\"truncated\":true}", host.run(s, "glob", "{\"root\":\".\",\"pattern\":\"*\"}"));
+    host.glob.truncated = false;
+    host.glob.scan_incomplete = .{ .reason = .depth, .limit = 64, .observed = 65 };
+    try expectOk("{\"groups\":[],\"truncated\":false,\"scan_incomplete\":{\"reason\":\"depth\",\"limit\":64,\"observed\":65,\"guidance\":\"Start from a deeper root and adjust the pattern relative to it. No matches in the scanned portion does not prove absence.\"}}", host.run(s, "glob", "{\"root\":\".\",\"pattern\":\"*\",\"ignored_list\":[]}"));
+    try testing.expectEqual(@as(usize, 0), host.ignored_list.?.len);
     host.grep = .{ .matches = &.{ .{ .path = "a:b", .line = 9, .text = "\"x\"" }, .{ .path = "z", .line = 20, .text = "\tγ" } }, .truncated = false };
     try expectOk(
         \\{"content":"a:b:9:\"x\"\nz:20:\tγ","matches":[{"path":"a:b","line":9,"text":"\"x\""},{"path":"z","line":20,"text":"\tγ"}],"truncated":false}
@@ -185,9 +191,12 @@ test "strict shape, lexical type, bounds, UTF-8 and digest admission occurs befo
         .{ "read", "{\"path\":\"a\",\"offset_line\":-2}" },
         .{ "read", "{\"path\":\"a\",\"offset_line\":18446744073709551616}" },
         .{ "read", "{\"path\":\"" ++ ("a" ** 4097) ++ "\"}" },
-        .{ "glob", "{\"root\":\".\",\"pattern\":\"" ++ ("é" ** 513) ++ "\"}" },
-        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"include_hidden\":1}" },
-        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"max_results\":4097}" },
+        .{ "glob", "{\"root\":\".\",\"pattern\":\"" ++ ("é" ** 513) ++ "\",\"ignored_list\":[]}" },
+        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"include_hidden\":1,\"ignored_list\":[]}" },
+        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"max_results\":4097,\"ignored_list\":[]}" },
+        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"ignored_list\":null}" },
+        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"ignored_list\":[[65]]}" },
+        .{ "glob", "{\"root\":\".\",\"pattern\":\"*\",\"ignored_list\":[false]}" },
         .{ "grep", "{\"root\":\".\",\"pattern\":\"*\",\"include_glob\":null}" },
         .{ "grep", "{\"root\":\".\",\"pattern\":\"*\",\"max_bytes\":1048577}" },
         .{ "write", "{\"path\":\"x\",\"content\":\"\",\"expected_version\":null}" },
@@ -473,7 +482,7 @@ test "output budgets reject oversized Host replies and replacement expansion bef
     host.read.content = "oversize";
     _ = try expectFailure("limit", host.run(s, "read", "{\"path\":\"a\",\"max_bytes\":1}"));
     host.glob.entries = &.{ .{ .path = "a", .kind = .file }, .{ .path = "b", .kind = .file } };
-    _ = try expectFailure("limit", host.run(s, "glob", "{\"root\":\".\",\"pattern\":\"*\",\"max_results\":1}"));
+    _ = try expectFailure("limit", host.run(s, "glob", "{\"root\":\".\",\"pattern\":\"*\",\"max_results\":1,\"ignored_list\":[]}"));
     host.grep.matches = &.{.{ .path = "abc", .line = 1, .text = "z" }};
     _ = try expectFailure("limit", host.run(s, "grep", "{\"root\":\".\",\"pattern\":\"z\",\"max_bytes\":1}"));
     host.grep.matches = &.{.{ .path = "�", .line = 1, .text = "" }};

@@ -19,7 +19,7 @@ pub fn function(comptime F: type, comptime module: []const u8, comptime name: []
 pub fn dropBufferEntry(index: u32) void {
     const raw = function(
         fn (u32) callconv(.C) void,
-        "microcrab:agent/execution@0.8.0",
+        "microcrab:agent/execution@0.9.0",
         "[resource-drop]buffer",
     );
     raw(index);

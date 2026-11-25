@@ -10,14 +10,14 @@
     {
       "name": "build",
       "description": "Implement and verify requested code changes.",
-      "prompt": "Implement the requested changes, preserve unrelated work and verify the result within the user's constraints. Read before editing, use exact file versions, and report partial or uncertain effects without replaying mutations.",
+      "prompt": "Implement the requested changes, preserve unrelated work and verify the result within the user's constraints. Read before editing, use scoped file version references, and report partial or uncertain effects without replaying mutations.",
       "role": "both"
     }
   ],
   "tools": [
     {
       "name": "read",
-      "description": "Read bounded, line-numbered UTF-8 text and its full-file SHA-256 version. Truncated output is incomplete; continue with next_line.",
+      "description": "Read text with scoped file version references (fv_). The reference covers the full file, even for an empty page. Truncated output is incomplete; continue with next_line.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -55,27 +55,8 @@
       }
     },
     {
-      "name": "read_image",
-      "description": "Read one PNG, JPEG, GIF or WebP image into model vision input. The source must be an ordinary file, at most20MiB; Host, guest memory and Context capacity may impose smaller bounds. No text conversion or resizing is performed.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096,
-            "description": "Host image path, workspace-relative or absolute where the configured Host filesystem policy permits it. Nonempty, <=4096 UTF-8 bytes, no NUL; null is invalid."
-          }
-        },
-        "required": [
-          "path"
-        ],
-        "additionalProperties": false
-      }
-    },
-    {
       "name": "write",
-      "description": "Atomically create or replace a UTF-8 file under expected_version. Returns its new SHA-256 version and byte count; conflicts do not overwrite.",
+      "description": "Atomically create or replace a UTF-8 file under expected_version. Returns its new version reference and byte count; conflicts do not overwrite.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -92,8 +73,8 @@
           },
           "expected_version": {
             "type": "string",
-            "pattern": "^[a-fA-F0-9]{64}$",
-            "description": "Full-file SHA-256 from read: 64 hex characters, case-insensitive. Omission requires a missing file; a supplied version must match to replace; null is invalid."
+            "pattern": "^(fv_([a-f0-9]{16}|[a-f0-9]{20}|[a-f0-9]{24})|[a-fA-F0-9]{64})$",
+            "description": "Use a reference from a read or committed receipt for this exact path (fv_ plus 16, 20 or 24 lowercase hex). Full SHA-256 is accepted for compatibility. Omission requires a missing file; a supplied version must match to replace; null is invalid."
           }
         },
         "required": [
@@ -117,13 +98,13 @@
           },
           "expected_version": {
             "type": "string",
-            "pattern": "^[a-fA-F0-9]{64}$",
-            "description": "Full-file SHA-256 from read: 64 hex characters, case-insensitive; null is invalid. The file must fit 10000 lines and 1048576 bytes."
+            "pattern": "^(fv_([a-f0-9]{16}|[a-f0-9]{20}|[a-f0-9]{24})|[a-fA-F0-9]{64})$",
+            "description": "Use a scoped fv_ reference for this path, or a full SHA-256 for compatibility; null is invalid. The file must fit 10000 lines and 1048576 bytes."
           },
           "old_string": {
             "type": "string",
             "maxLength": 1048576,
-            "description": "Literal UTF-8 match occurring exactly once: nonempty, <=1048576 bytes, no NUL; null is invalid.",
+            "description": "UTF-8 text to match literally, not a regular expression. Nonempty, <=1048576 bytes, no NUL; null is invalid.",
             "minLength": 1
           },
           "new_string": {
@@ -160,8 +141,8 @@
           },
           "expected_version": {
             "type": "string",
-            "pattern": "^[a-fA-F0-9]{64}$",
-            "description": "Full-file SHA-256 from read: 64 hex characters, case-insensitive; mismatch fails without writing. The original file must fit 10000 lines and 1048576 bytes; null is invalid."
+            "pattern": "^(fv_([a-f0-9]{16}|[a-f0-9]{20}|[a-f0-9]{24})|[a-fA-F0-9]{64})$",
+            "description": "Use a scoped fv_ reference for this path, or a full SHA-256 for compatibility; mismatch fails without writing. The original file must fit 10000 lines and 1048576 bytes; null is invalid."
           },
           "replacements": {
             "type": "array",
@@ -175,7 +156,7 @@
                 "old_string": {
                   "type": "string",
                   "maxLength": 1048576,
-                  "description": "UTF-8 match occurring exactly once at this step: nonempty, <=1048576 bytes, no NUL; null is invalid.",
+                  "description": "UTF-8 text to match literally, not a regular expression. Nonempty, <=1048576 bytes, no NUL; null is invalid.",
                   "minLength": 1
                 },
                 "new_string": {
@@ -207,7 +188,7 @@
     },
     {
       "name": "apply_patch",
-      "description": "Apply a bounded multi-file patch after whole-call preflight. Syntax: *** Begin Patch; *** Add File: path with +payload lines; *** Delete File: path; *** Update File: path optionally followed by *** Move to: destination, then @@ hunks with space=context, -=old, +=new lines; *** End Patch. Every header occupies its own LF-delimited line. Use \\ No newline at end of file after a payload line to omit its final LF. Hunks require exact unique nonempty source context; no fuzzy/numbered hunks. Pure move needs no hunks. At most 4300000 serialized argument bytes, 32 operations, 64 hunks/file, 1 MiB/file, 10000 source lines, 4 MiB patch text, 4 MiB total source and 4 MiB total result bytes. Every source requires a SHA256 version; every new destination requires missing and an existing parent directory (create parents explicitly before patching). Host/carrier refinements, including native remote 128 KiB request frames, may reject smaller patches during whole-call preflight. Unused/duplicate preconditions, path aliases/collisions and unsupported capabilities fail before mutations. Commits are sequential: receipts retain the committed prefix, failed/uncertain operation and not-started suffix. Never replay after uncertainty; no multi-file rollback guarantee.",
+      "description": "Apply a bounded multi-file patch after whole-call preflight. Syntax: *** Begin Patch; *** Add File: path with +payload lines; *** Delete File: path; *** Update File: path optionally followed by *** Move to: destination, then @@ hunks with space=context, -=old, +=new lines; *** End Patch. Every header occupies its own LF-delimited line. Use \\ No newline at end of file after a payload line to omit its final LF. Hunks require exact unique nonempty source context; no fuzzy/numbered hunks. Pure move needs no hunks. At most 4300000 serialized argument bytes, 32 operations, 64 hunks/file, 1 MiB/file, 10000 source lines, 4 MiB patch text, 4 MiB total source and 4 MiB total result bytes. Every source requires a scoped fv_ version reference (full SHA-256 also accepted); every new destination requires missing and an existing parent directory (create parents explicitly before patching). Host/carrier refinements, including native remote 128 KiB request frames, may reject smaller patches during whole-call preflight. Unused/duplicate preconditions, path aliases/collisions and unsupported capabilities fail before mutations. Commits are sequential: receipts retain the committed prefix, failed/uncertain operation and not-started suffix. Never replay after uncertainty; no multi-file rollback guarantee.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -224,7 +205,7 @@
             "description": "Exactly one explicit precondition per affected source or destination path; duplicate/unused entries fail before effects. null is invalid.",
             "items": {
               "type": "object",
-              "description": "An exact patch path and its expected existing SHA256 version or missing destination state.",
+              "description": "An exact patch path and its expected existing version reference or missing destination state.",
               "properties": {
                 "path": {
                   "type": "string",
@@ -233,7 +214,7 @@
                   "description": "Host file path, relative to its workspace root or absolute within it. Nonempty, <=4096 UTF-8 bytes, no NUL; null is invalid."
                 },
                 "expected": {
-                  "description": "Existing paths use {version:full-file SHA256}; new destinations use the string missing. null is invalid.",
+                  "description": "Existing paths use {version: scoped fv_ reference}; new destinations use the string missing. null is invalid.",
                   "oneOf": [
                     {
                       "type": "string",
@@ -246,8 +227,8 @@
                       "properties": {
                         "version": {
                           "type": "string",
-                          "pattern": "^[a-fA-F0-9]{64}$",
-                          "description": "Expected full-file SHA256 digest, 64 hex characters; null is invalid."
+                          "pattern": "^(fv_([a-f0-9]{16}|[a-f0-9]{20}|[a-f0-9]{24})|[a-fA-F0-9]{64})$",
+                          "description": "Scoped fv_ reference for this exact path, or a full SHA-256 for compatibility; null is invalid."
                         }
                       },
                       "required": [
@@ -275,7 +256,7 @@
     },
     {
       "name": "glob",
-      "description": "Find Host entries with a glob. Returns groups of kind (file, directory, symlink), each with a path array. Paths are workspace-relative inside the workspace and absolute outside it when explicit Host filesystem policy permits external access. Empty kinds are omitted. Links are listed without reading or traversing targets. Results include a truncation flag; truncated output is incomplete.",
+      "description": "Find Host entries with a glob. Returns groups of kind (file, directory, symlink), each with a path array. Paths are workspace-relative inside the workspace and absolute outside it when explicit Host filesystem policy permits external access. Empty kinds are omitted. Links are listed without reading or traversing targets. truncated means matching output was omitted; scan_incomplete means a scan limit left part of the search unexamined. An empty incomplete result is not proof of absence.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -289,17 +270,19 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1024,
-            "description": "Glob under root using Host syntax: nonempty, <=1024 UTF-8 bytes, no NUL; null is invalid."
+            "description": "Match paths relative to root. * does not cross /: *.md matches direct children only; **/*.md matches at any depth. Nonempty, <=1024 UTF-8 bytes, no NUL; null is invalid."
           },
           "include_hidden": {
             "type": "boolean",
             "default": false,
             "description": "Include hidden entries. Omission defaults to false; null is invalid."
           },
-          "include_ignored": {
-            "type": "boolean",
-            "default": false,
-            "description": "Include entries excluded by Host ignore rules. Omission defaults to false; null is invalid."
+          "ignored_list": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "maxItems": 4096,
+            "default": "{{var:glob_ignored}}",
+            "description": "Concrete workspace-relative paths, not glob rules. A trailing slash excludes a directory subtree; other paths exclude exactly the named node. Omission uses the current visible glob_ignored State; an explicit list replaces it and [] disables filtering. If the default is unavailable or incomplete, supply an explicit list. Null is invalid. Host path restrictions still apply."
           },
           "include_directories": {
             "type": "boolean",
@@ -323,7 +306,7 @@
     },
     {
       "name": "grep",
-      "description": "Search Host files for text. Returns structured matches, path:line:text and a truncation flag; truncated output is incomplete.",
+      "description": "Search file contents recursively. Returns structured matches, a path:line:text rendering, and a truncated flag.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -337,13 +320,13 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1024,
-            "description": "Host regex, or plain text when literal=true: nonempty, <=1024 UTF-8 bytes, no NUL; null is invalid."
+            "description": "Line-matching regular expression (for example, SessionState|visibility). Set literal: true to search for exact text instead. Nonempty, at most 1024 UTF-8 bytes, no NUL; null is invalid."
           },
           "include_glob": {
             "type": "string",
             "minLength": 1,
             "maxLength": 1024,
-            "description": "Host glob restricting paths under root: nonempty, <=1024 UTF-8 bytes, no NUL. Omission adds no restriction; null is invalid."
+            "description": "Filter files by path relative to root. * does not cross /: *.md selects only direct children, while **/*.{md,wit} selects Markdown and WIT files at any depth. Omit to apply no path filter. Nonempty, at most 1024 UTF-8 bytes, no NUL; null is invalid."
           },
           "case_sensitive": {
             "type": "boolean",
@@ -378,9 +361,6 @@
       }
     }
   ],
-  "tool_media_output_bytes": {
-    "read_image": 20971520
-  },
   "variables": {
     "description": "Coding agent. Start in plan mode to inspect and plan; switch to build mode when implementation is requested.",
     "rules": [
@@ -390,7 +370,7 @@
       },
       {
         "name": "safe_edits",
-        "description": "Read before editing, preserve unrelated changes, and use the returned full-file version for conditional writes. On conflict reread and reconsider the edit. Never claim a truncated read covers the full file."
+        "description": "Read before editing, preserve unrelated changes, and use the returned version reference for conditional writes. Reread after conflict, rollback, fork, Host change, or a new epoch. Never replay an uncertain mutation. Never claim a truncated read covers the full file."
       }
     ],
     "hints": [

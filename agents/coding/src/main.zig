@@ -1,10 +1,9 @@
-//! Coding Guest entry for the canonical Agent 0.8 world.
+//! Coding Guest entry for the canonical Agent 0.9 world.
 const std = @import("std");
 const abi = @import("coding_abi");
 const catalog = @import("catalog.zig");
 const text = @import("text.zig");
 const patch = @import("apply_patch.zig");
-const image = @import("image.zig");
 const shell = @import("shell.zig");
 const types = abi.types;
 const Allocator = std.mem.Allocator;
@@ -13,8 +12,36 @@ comptime {
     abi.exportAgent(@This());
 }
 
-pub fn init(_: Allocator) types.InitResult {
-    return .{ .ready = {} };
+pub fn init(scratch: Allocator) types.InitResult {
+    const encoded = switch (abi.host.glob_ignore.globIgnoredPaths(scratch)) {
+        .ok => |paths| std.json.stringifyAlloc(scratch, paths, .{}),
+        .err => |failure| std.json.stringifyAlloc(scratch, .{
+            .status = if (failure.code == .limit) "incomplete" else "unavailable",
+            // An operation message can contain host paths or other private details.
+            .reason = @tagName(failure.code),
+        }, .{}),
+    };
+    const value = encoded catch |err| return .{ .failed = .{
+        .code = "glob_ignored_encode_failed",
+        .message = @errorName(err),
+    } };
+    return switch (abi.session.variableChange(scratch, .{
+        .set = &.{},
+        .remove = &.{},
+        .scoped_set = &.{.{
+            .name = "glob_ignored",
+            .value_json = value,
+            .visibility = .visible,
+            .persistence = .persisted,
+            .editors = &.{.client},
+        }},
+    })) {
+        .ok => .{ .ready = {} },
+        .err => |failure| .{ .failed = .{
+            .code = @tagName(failure.code),
+            .message = std.fmt.allocPrint(scratch, "could not publish glob_ignored: {s}", .{failure.message}) catch failure.message,
+        } },
+    };
 }
 
 fn hostInfo(scratch: Allocator, supplied: []const u8) types.Result(catalog.HostInfo, []const u8) {
@@ -47,7 +74,8 @@ pub fn invoke(scratch: Allocator, supplied: []const u8, name: []const u8, argume
         .ok => |value| value,
         .err => |message| return failed(message),
     };
-    var reserved = switch (abi.execution.create(scratch, &.{ "result", "stdout", "stderr" })) {
+    const textChannel = types.OutputChannel.text;
+    var reserved = switch (abi.execution.create(scratch, &.{ textChannel("result"), textChannel("stdout"), textChannel("stderr") })) {
         .ok => |value| value,
         .err => |failure| return .{ .err = failure },
     };
@@ -62,7 +90,6 @@ pub fn invoke(scratch: Allocator, supplied: []const u8, name: []const u8, argume
     if (host.shellName()) |name_of_shell| {
         if (eq(u8, name, name_of_shell)) return shell.invoke(scratch, arguments, &reserved);
     }
-    if (eq(u8, name, "read_image")) return image.invoke(scratch, arguments);
     const multi_patch = eq(u8, name, "apply_patch");
     const facts: ?types.CallFacts = if (text.needsToolCallFacts(name))
         switch (abi.session.toolCallFacts(scratch)) {
@@ -76,7 +103,7 @@ pub fn invoke(scratch: Allocator, supplied: []const u8, name: []const u8, argume
         }
     else
         null;
-    const result = if (multi_patch) patch.invoke(scratch, arguments) else text.invoke(scratch, name, arguments, abi.host, facts);
+    const result = if (multi_patch) patch.invoke(scratch, arguments) else text.invokeVersioned(scratch, name, arguments, abi.host, facts);
     const content = switch (result) {
         .ok => |value| value,
         .err => |failure| return .{ .err = failure },

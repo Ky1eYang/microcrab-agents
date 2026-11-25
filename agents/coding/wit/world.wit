@@ -1,13 +1,10 @@
-package microcrab:coding@0.1.0;
+package microcrab:coding@0.5.0;
 world coding {
-  include microcrab:agent/agent@0.8.0;
+  include microcrab:agent/agent@0.9.0;
   import microcrab:session/variables@0.2.0;
-  import microcrab:host/text-read@0.1.0;
-  import microcrab:host/filesystem@0.1.0;
-  import microcrab:host/text-write@0.1.0;
-  import microcrab:host/file-mutation@0.1.0;
+  import microcrab:session/file-versions@0.2.0;
   import microcrab:host/cache-points@0.1.0;
-  import microcrab:host/glob@0.1.0;
+  import microcrab:host/glob-ignore@0.1.0;
   import microcrab:host/grep@0.1.0;
   import microcrab:host/shell@0.1.0;
   import microcrab:host/process@0.1.0;

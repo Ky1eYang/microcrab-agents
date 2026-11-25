@@ -13,7 +13,7 @@ pub const ToolFailure = struct {
     retryable: bool,
 };
 
-// A resource-table index is not the same as a Host process or file identity.
+// A resource-table index is not the same as a Host process identity.
 // Keep the two Agent resource transfer modes distinct at the Zig boundary.
 pub const BorrowedBuffer = struct { index: u32 };
 pub const OwnedBuffer = struct {
@@ -38,6 +38,16 @@ pub const FinalOutput = struct {
 };
 pub const BufferedOutput = struct { output: OwnedBuffer, include_initial: bool };
 pub const ToolOutput = union(enum) { final: FinalOutput, buffered: BufferedOutput };
+pub const ContentKind = union(enum) { text: void, bytes: []const u8 };
+pub const OutputChannel = struct {
+    name: []const u8,
+    kind: ContentKind,
+
+    pub fn text(name: []const u8) OutputChannel {
+        return .{ .name = name, .kind = .{ .text = {} } };
+    }
+};
+pub const ProcessSource = enum { raw_pipes, shell_text };
 pub const DriverStep = struct { state: []const u8, wake_after_ms: u64, finished: bool };
 pub const InitError = struct { code: []const u8, message: []const u8 };
 pub const InitResult = union(enum) { ready: void, failed: InitError };
@@ -128,6 +138,13 @@ pub const GlobRequest = struct {
 };
 pub const GlobEntry = struct { path: []const u8, kind: enum { file, directory, symlink } };
 pub const GlobOutput = struct { entries: []const GlobEntry, truncated: bool };
+pub const GlobScanReason = enum { entries, depth };
+pub const GlobScanIncomplete = struct { reason: GlobScanReason, limit: u32, observed: u32 };
+pub const ResolvedGlobOutput = struct {
+    entries: []const GlobEntry,
+    truncated: bool,
+    scan_incomplete: ?GlobScanIncomplete = null,
+};
 pub const GrepRequest = struct {
     root: []const u8,
     pattern: []const u8,
@@ -139,13 +156,6 @@ pub const GrepRequest = struct {
 };
 pub const GrepMatch = struct { path: []const u8, line: u64, text: []const u8 };
 pub const GrepOutput = struct { matches: []const GrepMatch, truncated: bool };
-
-pub const FileMeta = struct {
-    kind: enum { file, directory, symlink, other },
-    size: u64,
-    modified_ms: ?u64,
-};
-pub const FileHandle = struct { id: u64 };
 
 pub const ProcessHandle = struct { id: u64, pid: ?u32 };
 pub const ProcessSignal = enum { term, kill, int, hup, usr1, usr2 };

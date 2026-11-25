@@ -4,6 +4,7 @@
     .minimum_zig_version = "0.13.0",
     .dependencies = .{
         .coding = .{ .path = "agents/coding" },
+        .browser = .{ .path = "agents/browser" },
     },
     .paths = .{
         "build.zig",

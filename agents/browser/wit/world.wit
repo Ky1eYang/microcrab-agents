@@ -1,0 +1,15 @@
+package microcrab:browser@0.5.1;
+
+world browser {
+  include microcrab:agent/agent@0.9.0;
+  import microcrab:host/web-transport@0.1.0;
+  import microcrab:host/web-transport-scoped@0.1.1;
+  import microcrab:session/variables@0.2.0;
+  import microcrab:session/private-bytes@0.2.1;
+  import microcrab:session/observation@0.2.2;
+}
+
+world browser-debug {
+  include browser;
+  import microcrab:session/browser-observation@0.2.3;
+}

@@ -22,6 +22,14 @@ const pattern_bytes = 1024;
 /// `abi.host` in the guest, or matching interfaces in native tests. Results and
 /// requests may borrow the call inputs or scratch (the callback arena).
 pub fn invoke(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, invocation: ?types.CallFacts) Result([]const u8, ToolFailure) {
+    return invokeLane(scratch, name, arguments, host, invocation, false);
+}
+
+pub fn invokeVersioned(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, invocation: ?types.CallFacts) Result([]const u8, ToolFailure) {
+    return invokeLane(scratch, name, arguments, host, invocation, true);
+}
+
+fn invokeLane(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, invocation: ?types.CallFacts, comptime versioned: bool) Result([]const u8, ToolFailure) {
     const facts = if (needsToolCallFacts(name)) blk: {
         const admitted = invocation orelse return .{ .err = planDenied("missing admitted invocation context") };
         const is_plan = if (admitted.admitted_mode) |mode| blk_mode: {
@@ -32,7 +40,7 @@ pub fn invoke(scratch: Allocator, name: []const u8, arguments: []const u8, host:
         if (!plan.validSessionId(admitted.session_id)) return .{ .err = invalidFacts("InvalidInvocationSession") };
         break :blk if (is_plan) admitted else null;
     } else null;
-    return invokeInner(scratch, name, arguments, host, facts) catch .{ .err = allocation_failure };
+    return invokeInner(scratch, name, arguments, host, facts, versioned) catch .{ .err = allocation_failure };
 }
 
 fn invalidFacts(message: []const u8) ToolFailure {
@@ -116,7 +124,7 @@ const GlobArgs = struct {
     root: String,
     pattern: String,
     include_hidden: bool = false,
-    include_ignored: bool = false,
+    ignored_list: []const String,
     include_directories: bool = false,
     max_results: Unsigned = .{ .value = 100 },
 };
@@ -193,7 +201,7 @@ fn json(scratch: Allocator, value: anytype) Allocator.Error!Result([]const u8, T
     return .{ .ok = try std.json.stringifyAlloc(scratch, value, .{}) };
 }
 
-fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, facts: ?types.CallFacts) Allocator.Error!Result([]const u8, ToolFailure) {
+fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host: anytype, facts: ?types.CallFacts, comptime versioned: bool) Allocator.Error!Result([]const u8, ToolFailure) {
     if (arguments.len > max_arguments) return .{ .err = invalid("argument byte limit exceeded") };
     const Tool = enum { read, glob, grep, write, edit, patch };
     switch (std.meta.stringToEnum(Tool, name) orelse return .{ .err = invalid("unknown tool") }) {
@@ -204,15 +212,17 @@ fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host
             };
             if (checkString(a.path.value, path_bytes, true) orelse checkRange(a.offset_line.value, std.math.maxInt(u64)) orelse
                 checkRange(a.max_lines.value, max_lines) orelse checkRange(a.max_bytes.value, max_bytes)) |err| return .{ .err = err };
-            const output = switch (host.text_read.read(scratch, .{
+            const read_request: types.ReadRequest = .{
                 .path = a.path.value,
                 .offset_line = a.offset_line.value,
                 .max_lines = a.max_lines.value,
                 .max_bytes = a.max_bytes.value,
-            })) {
+            };
+            const observed = switch (readVersion(scratch, host, read_request, versioned)) {
                 .ok => |out| out,
                 .err => |err| return .{ .err = operationFailure(err) },
             };
+            const output = observed.page;
             if (output.content.len > a.max_bytes.value or output.version.len > 64) return .{ .err = replyLimit() };
             const line_count = countLines(output.content);
             if (line_count > a.max_lines.value) return .{ .err = replyLimit() };
@@ -227,23 +237,31 @@ fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host
                 try numbered.writer().print("{d}\t{s}", .{ number, remaining[0..end] });
                 remaining = remaining[end..];
             }
-            return json(scratch, .{ .content = numbered.items, .start_line = output.start_line, .next_line = output.next_line, .truncated = output.truncated, .version = output.version });
+            return json(scratch, .{ .content = numbered.items, .start_line = output.start_line, .next_line = output.next_line, .truncated = output.truncated, .version = observed.reference });
         },
         .glob => {
             const a = switch (try parse(GlobArgs, scratch, arguments)) {
                 .ok => |args| args,
-                .err => |err| return .{ .err = err },
+                .err => |err| {
+                    if (std.mem.eql(u8, err.message, "missing required argument field") or
+                        std.mem.eql(u8, err.message, "unexpected JSON value in arguments"))
+                        return .{ .err = invalid("glob requires root and pattern strings and a resolved ignored_list array; supply a list explicitly (use [] to disable filtering) if the default is unavailable") };
+                    return .{ .err = err };
+                },
             };
             if (checkString(a.root.value, path_bytes, true) orelse checkString(a.pattern.value, pattern_bytes, true) orelse
                 checkRange(a.max_results.value, max_results)) |err| return .{ .err = err };
-            const output = switch (host.glob.glob(scratch, .{
+            if (a.ignored_list.len > 4096) return .{ .err = invalid("ignored_list exceeds 4096 paths") };
+            const ignored_list = try scratch.alloc([]const u8, a.ignored_list.len);
+            for (a.ignored_list, ignored_list) |path, *slot| slot.* = path.value;
+            const output = switch (host.glob_ignore.globWithIgnoredPaths(scratch, .{
                 .root = a.root.value,
                 .pattern = a.pattern.value,
                 .include_hidden = a.include_hidden,
-                .include_ignored = a.include_ignored,
+                .include_ignored = false,
                 .include_directories = a.include_directories,
                 .max_results = a.max_results.value,
-            })) {
+            }, ignored_list)) {
                 .ok => |out| out,
                 .err => |err| return .{ .err = operationFailure(err) },
             };
@@ -289,7 +307,7 @@ fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host
                 if (generated.len > max_bytes or countLines(generated) > max_lines) return .{ .err = invalid("plan including generated metadata exceeds edit limits") };
                 break :blk generated;
             } else a.content.value;
-            const output = switch (controlledWrite(scratch, host, .{ .path = a.path.value, .content = content, .precondition = precondition })) {
+            const output = switch (controlledWrite(scratch, host, .{ .path = a.path.value, .content = content, .precondition = precondition }, versioned)) {
                 .ok => |out| out,
                 .err => |err| return .{ .err = err },
             };
@@ -300,19 +318,19 @@ fn invokeInner(scratch: Allocator, name: []const u8, arguments: []const u8, host
                 .ok => |args| args,
                 .err => |err| return .{ .err = err },
             };
-            return replace(scratch, host, a.path.value, a.expected_version.value, &.{.{ .old_string = a.old_string, .new_string = a.new_string, .replace_all = a.replace_all }}, facts);
+            return replace(scratch, host, a.path.value, a.expected_version.value, &.{.{ .old_string = a.old_string, .new_string = a.new_string, .replace_all = a.replace_all }}, facts, versioned);
         },
         .patch => {
             const a = switch (try parse(PatchArgs, scratch, arguments)) {
                 .ok => |args| args,
                 .err => |err| return .{ .err = err },
             };
-            return replace(scratch, host, a.path.value, a.expected_version.value, a.replacements.values.constSlice(), null);
+            return replace(scratch, host, a.path.value, a.expected_version.value, a.replacements.values.constSlice(), null, versioned);
         },
     }
 }
 
-fn renderGlob(scratch: Allocator, output: types.GlobOutput, limit: u64) Allocator.Error!Result([]const u8, ToolFailure) {
+fn renderGlob(scratch: Allocator, output: types.ResolvedGlobOutput, limit: u64) Allocator.Error!Result([]const u8, ToolFailure) {
     if (output.entries.len > limit) return .{ .err = replyLimit() };
     const Kind = @TypeOf(@as(types.GlobEntry, undefined).kind);
     const Group = struct { kind: Kind, path: []const []const u8 };
@@ -336,6 +354,21 @@ fn renderGlob(scratch: Allocator, output: types.GlobOutput, limit: u64) Allocato
         if (written == 0) continue;
         groups.appendAssumeCapacity(.{ .kind = kind, .path = remaining[0..written] });
         remaining = remaining[written..];
+    }
+    if (output.scan_incomplete) |incomplete| {
+        return json(scratch, .{
+            .groups = groups.constSlice(),
+            .truncated = output.truncated,
+            .scan_incomplete = .{
+                .reason = incomplete.reason,
+                .limit = incomplete.limit,
+                .observed = incomplete.observed,
+                .guidance = switch (incomplete.reason) {
+                    .entries => "Use a narrower root or a pattern starting with a literal directory prefix. No matches in the scanned portion does not prove absence.",
+                    .depth => "Start from a deeper root and adjust the pattern relative to it. No matches in the scanned portion does not prove absence.",
+                },
+            },
+        });
     }
     return json(scratch, .{ .groups = groups.constSlice(), .truncated = output.truncated });
 }
@@ -368,12 +401,22 @@ fn countLines(bytes: []const u8) usize {
     return std.mem.count(u8, bytes, "\n") + @intFromBool(bytes.len != 0 and bytes[bytes.len - 1] != '\n');
 }
 
-fn controlledWrite(scratch: Allocator, host: anytype, request: types.WriteRequest) Result(types.WriteOutput, ToolFailure) {
+const VersionedRead = @import("coding_abi").host.file_versions.VersionedRead;
+
+fn readVersion(scratch: Allocator, host: anytype, request: types.ReadRequest, comptime versioned: bool) Result(VersionedRead, types.OperationError) {
+    if (versioned) return host.file_versions.read(scratch, request);
+    return switch (host.text_read.read(scratch, request)) {
+        .ok => |page| .{ .ok = .{ .page = page, .reference = page.version } },
+        .err => |err| .{ .err = err },
+    };
+}
+
+fn controlledWrite(scratch: Allocator, host: anytype, request: types.WriteRequest, comptime versioned: bool) Result(types.WriteOutput, ToolFailure) {
     switch (host.cache_points.capture(scratch, request.path, max_bytes)) {
         .ok => {},
         .err => |err| return .{ .err = operationFailure(err) },
     }
-    const output = switch (host.text_write.write(scratch, request)) {
+    const output = switch (if (versioned) host.file_versions.write(scratch, request) else host.text_write.write(scratch, request)) {
         .ok => |out| out,
         .err => |err| return .{ .err = operationFailure(err) },
     };
@@ -398,17 +441,18 @@ fn committedJson(scratch: Allocator, value: anytype) Result([]const u8, ToolFail
     } };
 }
 
-fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []const u8, replacements: []const Replacement, facts: ?types.CallFacts) Allocator.Error!Result([]const u8, ToolFailure) {
+fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []const u8, replacements: []const Replacement, facts: ?types.CallFacts, comptime versioned: bool) Allocator.Error!Result([]const u8, ToolFailure) {
     if (checkString(path, path_bytes, true)) |err| return .{ .err = err };
     if (facts != null and !plan.markdownPath(path)) return .{ .err = planDenied("PLAN edit requires a .md path") };
     if (!validDigest(expected)) return .{ .err = invalid_digest };
     for (replacements) |r| {
         if (checkString(r.old_string.value, max_bytes, true) orelse checkString(r.new_string.value, max_bytes, false)) |err| return .{ .err = err };
     }
-    const original = switch (host.text_read.read(scratch, .{ .path = path, .offset_line = 1, .max_lines = max_lines, .max_bytes = max_bytes })) {
+    const observed = switch (readVersion(scratch, host, .{ .path = path, .offset_line = 1, .max_lines = max_lines, .max_bytes = max_bytes }, versioned)) {
         .ok => |out| out,
         .err => |err| return .{ .err = operationFailure(err) },
     };
+    const original = observed.page;
     if (original.truncated or original.next_line != null or original.start_line != 1 or
         original.content.len > max_bytes or countLines(original.content) > max_lines)
         return .{ .err = invalid("edit requires a complete bounded read; file exceeds edit limits") };
@@ -451,7 +495,7 @@ fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []cons
         }
     }
     if (std.mem.eql(u8, body, content)) return json(scratch, .{
-        .version = original.version,
+        .version = observed.reference,
         .bytes = original.content.len,
         .changed = false,
         .replacement_counts = counts.constSlice(),
@@ -461,7 +505,7 @@ fn replace(scratch: Allocator, host: anytype, path: []const u8, expected: []cons
         content = try header.refresh(scratch, content, facts.?.observed_at_unix_ms);
         if (content.len > max_bytes or countLines(content) > max_lines) return .{ .err = invalid("plan including generated metadata exceeds edit limits") };
     }
-    const output = switch (controlledWrite(scratch, host, .{ .path = path, .content = content, .precondition = .{ .version = original.version } })) {
+    const output = switch (controlledWrite(scratch, host, .{ .path = path, .content = content, .precondition = .{ .version = original.version } }, versioned)) {
         .ok => |out| out,
         .err => |err| return .{ .err = err },
     };

@@ -3,8 +3,10 @@
 Zig-based WebAssembly Component agents for MicroCrab, with independently
 buildable Agent packages and shared ABI tooling.
 
-The [Coding Agent](agents/coding/) is currently the only package. It provides
-Host-scoped coding tools, PLAN/BUILD policies, and buffered shell execution.
+The [Coding Agent](<agents/coding/>) provides Host-scoped coding tools,
+PLAN/BUILD policies, and buffered shell execution. The opt-in
+[Browser Agent](<agents/browser/README.md>) observes an explicitly supplied
+browser over the selected native Bridge, without controlling its lifecycle.
 Building this repository does not select or install an Agent in MicroCrab.
 [MicroCrab Core](https://github.com/Ky1eYang/microcrab-core) owns the Runtime and
 still supplies its Rust Coding and Universal implementations.
@@ -34,6 +36,9 @@ Each Agent owns its `build.zig.zon`, guest code, tests and WIT world. The
 repository root aggregates builds; `shared/` contains common ABI memory code.
 Package-directory builds intentionally use local dependencies in the same
 checkout; a detached Agent subdirectory is not a self-contained distribution.
+The unsuffixed root steps above remain Coding-only. See the
+[Browser verification commands](<agents/browser/README.md#L9-L24>) for the
+explicit Browser test, check, and component steps.
 
 ## Verify against Core and produce a Component
 

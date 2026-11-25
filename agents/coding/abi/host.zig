@@ -7,6 +7,7 @@ const layout = @import("layout.zig");
 const Scratch = std.mem.Allocator;
 const Result = types.Result;
 
+/// Exact compatibility imports are retained only for detached ABI probes.
 pub const text_read = struct {
     pub fn read(scratch: Scratch, request: types.ReadRequest) Op(types.ReadOutput) {
         const raw = wire.function(
@@ -31,6 +32,29 @@ pub const text_write = struct {
     }
 };
 
+pub const file_versions = struct {
+    const module = "microcrab:session/file-versions@0.2.0";
+    pub const VersionedRead = struct { page: types.ReadOutput, reference: []const u8 };
+
+    pub fn read(scratch: Scratch, request: types.ReadRequest) Op(VersionedRead) {
+        const raw = wire.function(fn (u32, u32, u64, u64, u64, u32) callconv(.C) void, module, "read");
+        return wire.call(Op(VersionedRead), scratch, raw, wire.slice(request.path) ++ .{ request.offset_line, request.max_lines, request.max_bytes });
+    }
+
+    pub fn write(scratch: Scratch, request: types.WriteRequest) Op(types.WriteOutput) {
+        const raw = wire.function(fn (u32, u32, u32, u32, u32, u32, u32, u32) callconv(.C) void, module, "write");
+        return wire.call(Op(types.WriteOutput), scratch, raw, writeArgs(request));
+    }
+
+    pub fn preflight(scratch: Scratch, requests: []const types.FileMutation) Op([]const types.FileMutation) {
+        return mutationPreflight(module, scratch, requests);
+    }
+
+    pub fn mutate(scratch: Scratch, request: types.FileMutation) Op(types.MutationOutput) {
+        return mutationApply(module, scratch, request);
+    }
+};
+
 pub const cache_points = struct {
     pub fn capture(scratch: Scratch, path: []const u8, max_bytes: u64) Op(void) {
         const raw = wire.function(
@@ -46,39 +70,79 @@ pub const file_mutation = struct {
     const module = "microcrab:host/file-mutation@0.1.0";
 
     pub fn preflight(scratch: Scratch, requests: []const types.FileMutation) Op([]const types.FileMutation) {
-        const raw = wire.function(fn (u32, u32, u32) callconv(.C) void, module, "preflight");
-        const RequestList = []const types.FileMutation;
-        var pair: [layout.of(RequestList).size]u8 = undefined;
-        codec.lowerScratch(RequestList, scratch, requests, &pair);
-        const address = std.mem.readInt(u32, pair[0..4], .little);
-        return wire.call(Op(RequestList), scratch, raw, .{ address, @as(u32, requests.len) });
+        return mutationPreflight(module, scratch, requests);
     }
 
     pub fn mutate(scratch: Scratch, request: types.FileMutation) Op(types.MutationOutput) {
-        const raw = wire.function(
-            fn (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) callconv(.C) void,
-            module,
-            "mutate",
-        );
-        const Output = Op(types.MutationOutput);
-        // Keep the variant tag and the padded payload slots explicit.
-        return switch (request) {
-            .write => |item| wire.call(Output, scratch, raw, .{@as(u32, 0)} ++ writeArgs(item) ++ .{@as(u32, 0)}),
-            .delete => |item| wire.call(Output, scratch, raw, .{@as(u32, 1)} ++ wire.slice(item.path) ++
-                wire.slice(item.expected_version) ++ .{ 0, 0, 0, 0 }),
-            .move => |item| wire.call(Output, scratch, raw, .{@as(u32, 2)} ++ wire.slice(item.path) ++
-                wire.slice(item.destination) ++ wire.slice(item.expected_version) ++
-                wire.slice(item.content)),
-        };
+        return mutationApply(module, scratch, request);
     }
 };
 
-pub const glob = struct {
-    pub fn glob(scratch: Scratch, request: types.GlobRequest) Op(types.GlobOutput) {
+fn mutationPreflight(comptime module: []const u8, scratch: Scratch, requests: []const types.FileMutation) Op([]const types.FileMutation) {
+    const raw = wire.function(fn (u32, u32, u32) callconv(.C) void, module, "preflight");
+    const RequestList = []const types.FileMutation;
+    var pair: [layout.of(RequestList).size]u8 = undefined;
+    codec.lowerScratch(RequestList, scratch, requests, &pair);
+    const address = std.mem.readInt(u32, pair[0..4], .little);
+    return wire.call(Op(RequestList), scratch, raw, .{ address, @as(u32, requests.len) });
+}
+
+fn mutationApply(comptime module: []const u8, scratch: Scratch, request: types.FileMutation) Op(types.MutationOutput) {
+    const raw = wire.function(
+        fn (u32, u32, u32, u32, u32, u32, u32, u32, u32, u32) callconv(.C) void,
+        module,
+        "mutate",
+    );
+    const Output = Op(types.MutationOutput);
+    // Keep the variant tag and the padded payload slots explicit.
+    return switch (request) {
+        .write => |item| wire.call(Output, scratch, raw, .{@as(u32, 0)} ++ writeArgs(item) ++ .{@as(u32, 0)}),
+        .delete => |item| wire.call(Output, scratch, raw, .{@as(u32, 1)} ++ wire.slice(item.path) ++
+            wire.slice(item.expected_version) ++ .{ 0, 0, 0, 0 }),
+        .move => |item| wire.call(Output, scratch, raw, .{@as(u32, 2)} ++ wire.slice(item.path) ++
+            wire.slice(item.destination) ++ wire.slice(item.expected_version) ++
+            wire.slice(item.content)),
+    };
+}
+
+pub const glob_ignore = struct {
+    const module = "microcrab:host/glob-ignore@0.1.0";
+
+    pub fn globIgnoredPaths(scratch: Scratch) Op([]const []const u8) {
+        const raw = wire.function(fn (u32) callconv(.C) void, module, "glob-ignored-paths");
+        return wire.call(Op([]const []const u8), scratch, raw, .{});
+    }
+
+    pub fn globWithIgnoredPaths(scratch: Scratch, request: types.GlobRequest, paths: []const []const u8) Op(types.ResolvedGlobOutput) {
+        const raw = wire.function(
+            fn (u32, u32, u32, u32, u32, u32, u32, u64, u32, u32, u32) callconv(.C) void,
+            module,
+            "glob-with-ignored-paths",
+        );
+        const Paths = []const []const u8;
+        var pair: [layout.of(Paths).size]u8 = undefined;
+        codec.lowerScratch(Paths, scratch, paths, &pair);
+        const address = std.mem.readInt(u32, pair[0..4], .little);
+        return wire.call(Op(types.ResolvedGlobOutput), scratch, raw, wire.slice(request.root) ++ wire.slice(request.pattern) ++ .{
+            @as(u32, @intFromBool(request.include_hidden)),
+            @as(u32, @intFromBool(request.include_ignored)),
+            @as(u32, @intFromBool(request.include_directories)),
+            request.max_results,
+            address,
+            @as(u32, paths.len),
+        });
+    }
+
+    pub fn snapshot(scratch: Scratch) Op([]const u8) {
+        const raw = wire.function(fn (u32) callconv(.C) void, module, "snapshot");
+        return wire.call(Op([]const u8), scratch, raw, .{});
+    }
+
+    pub fn globFromState(scratch: Scratch, request: types.GlobRequest) Op(types.GlobOutput) {
         const raw = wire.function(
             fn (u32, u32, u32, u32, u32, u32, u32, u64, u32) callconv(.C) void,
-            "microcrab:host/glob@0.1.0",
-            "glob",
+            module,
+            "glob-from-state",
         );
         return wire.call(Op(types.GlobOutput), scratch, raw, wire.slice(request.root) ++ wire.slice(request.pattern) ++ .{
             @as(u32, @intFromBool(request.include_hidden)),
@@ -103,31 +167,6 @@ pub const grep = struct {
             request.max_matches,
             request.max_bytes,
         });
-    }
-};
-
-pub const filesystem = struct {
-    const module = "microcrab:host/filesystem@0.1.0";
-
-    pub fn stat(scratch: Scratch, path: []const u8) Host(types.FileMeta) {
-        const raw = wire.function(fn (u32, u32, u32) callconv(.C) void, module, "stat");
-        return wire.call(Host(types.FileMeta), scratch, raw, wire.slice(path));
-    }
-
-    pub fn openRead(scratch: Scratch, path: []const u8) Host(types.FileHandle) {
-        const raw = wire.function(fn (u32, u32, u32, u32) callconv(.C) void, module, "open");
-        const open_read: u32 = 1;
-        return wire.call(Host(types.FileHandle), scratch, raw, wire.slice(path) ++ .{open_read});
-    }
-
-    pub fn read(scratch: Scratch, handle: types.FileHandle, offset: u64, len: u32) Host([]const u8) {
-        const raw = wire.function(fn (u64, u64, u32, u32) callconv(.C) void, module, "read");
-        return wire.call(Host([]const u8), scratch, raw, .{ handle.id, offset, len });
-    }
-
-    pub fn close(scratch: Scratch, handle: types.FileHandle) Host(void) {
-        const raw = wire.function(fn (u64, u32) callconv(.C) void, module, "close");
-        return wire.call(Host(void), scratch, raw, .{handle.id});
     }
 };
 
@@ -184,7 +223,7 @@ pub const shell = struct {
 };
 
 pub fn hostInfo(scratch: Scratch) Result([]const u8, types.CommunicationError) {
-    const raw = wire.function(fn (u32) callconv(.C) void, "microcrab:agent/host-info@0.8.0", "host-info");
+    const raw = wire.function(fn (u32) callconv(.C) void, "microcrab:agent/host-info@0.9.0", "host-info");
     return wire.call(Result([]const u8, types.CommunicationError), scratch, raw, .{});
 }
 

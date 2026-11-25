@@ -1,4 +1,4 @@
-//! Call-scoped argument validation and failure translation for image and shell.
+//! Call-scoped argument validation and failure translation for the shell tool.
 const std = @import("std");
 const types = @import("coding_abi").types;
 const Allocator = std.mem.Allocator;

@@ -47,7 +47,7 @@ pub fn invoke(scratch: Scratch, _: []const u8, name: []const u8, arguments: []co
         } },
     };
     if (!request.buffered) return .{ .ok = .{ .final = .{ .content = result.content } } };
-    var buffer = switch (abi.execution.create(scratch, &.{"result"})) {
+    var buffer = switch (abi.execution.create(scratch, &.{t.OutputChannel.text("result")})) {
         .ok => |owned| owned,
         .err => |err| return .{ .err = err },
     };
