@@ -138,8 +138,8 @@ test "realistic accessibility response stays within the bounded projection path"
     try t.expectEqual(mock.sends.len, mock.sent);
 }
 
-fn rejectPrivateBytes(_: []const u8, _: []const u8, _: []const u8) bool {
-    return false;
+fn rejectReference(_: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) @import("guest.zig").ReferenceResult {
+    return .{ .err = "rejected" };
 }
 
 test "shared Browser slot rejects reentry without sending and releases after success and failure" {
@@ -152,19 +152,19 @@ test "shared Browser slot rejects reentry without sending and releases after suc
     const a = arena.allocator();
 
     try t.expect(self.acquireTool());
-    const busy = guest.invoke(&self, tr, rejectPrivateBytes, a, t.allocator, true, null, "status", "{\"connect_id\":\"moc1\"}");
+    const busy = guest.invoke(&self, tr, rejectReference, a, t.allocator, true, null, "status", "{\"connect_id\":\"moc1\"}");
     try t.expectEqualStrings("browser_connection_busy", busy.fail.code);
     try t.expectEqual(@as(usize, 0), mock.sent);
     try t.expectEqual(@as(usize, 0), mock.statuses);
     var other = browser.Browser{};
-    const independent = guest.invoke(&other, tr, rejectPrivateBytes, a, t.allocator, true, null, "status", "{\"connect_id\":\"moc1\"}");
+    const independent = guest.invoke(&other, tr, rejectReference, a, t.allocator, true, null, "status", "{\"connect_id\":\"moc1\"}");
     try t.expectEqualStrings("stale_connection", independent.fail.code);
     self.releaseTool();
 
-    const missing = guest.invoke(&self, tr, rejectPrivateBytes, a, t.allocator, true, null, "list_pages", "{}");
+    const missing = guest.invoke(&self, tr, rejectReference, a, t.allocator, true, null, "list_pages", "{}");
     try t.expectEqualStrings("invalid_request", missing.fail.code);
     try self.connect(tr, a, ws);
-    const finished = guest.invoke(&self, tr, rejectPrivateBytes, a, t.allocator, true, null, "status", "{\"connect_id\":\"moc1\"}");
+    const finished = guest.invoke(&self, tr, rejectReference, a, t.allocator, true, null, "status", "{\"connect_id\":\"moc1\"}");
     try t.expectEqualStrings("{\"status\":\"connected\"}", finished.ok);
     try t.expect(self.acquireTool());
     self.releaseTool();

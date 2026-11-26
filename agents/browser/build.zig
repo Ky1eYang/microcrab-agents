@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) void {
         "deps/host/host.wit",
         "deps/host-scoped/scoped-web-transport.wit",
         "deps/session-scoped/scoped-variables.wit",
-        "deps/session-private/private-bytes.wit",
+        "deps/session-references/references.wit",
         "deps/session-observation/observation.wit",
         "deps/session-browser-observation/browser-observation.wit",
     }) |file| {

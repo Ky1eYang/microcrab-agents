@@ -7,7 +7,7 @@ const module = await WebAssembly.compile(source);
 const hostInfo = 'microcrab:agent/host-info@0.9.0';
 const execution = 'microcrab:agent/execution@0.9.0';
 const variables = 'microcrab:session/variables@0.2.0';
-const privateBytes = 'microcrab:session/private-bytes@0.2.1';
+const references = 'microcrab:session/references@0.3.0';
 const observer = 'microcrab:session/observation@0.2.2';
 const debugObservation = process.argv.includes('--debug-observation');
 const observations = [];
@@ -21,7 +21,7 @@ const importKeys = WebAssembly.Module.imports(module).map(({module, name, kind})
 assert.deepEqual(importKeys, [
     `${hostInfo}:host-info:function`, `${variables}:tool-call-facts:function`,
     ...['create', 'append', 'finish', 'attach-guest', '[resource-drop]buffer'].map(name => `${execution}:${name}:function`),
-    `${privateBytes}:create:function`, `${observer}:record-event:function`, ...webNames.map(name => `${webTransport}:${name}:function`),
+    `${references}:create:function`, `${observer}:record-event:function`, ...webNames.map(name => `${webTransport}:${name}:function`),
     ...scopedNames.map(name => `${scopedWeb}:${name}:function`),
     ...(debugObservation ? [`${browserObserver}:record-checkpoint:function`] : []),
 ].sort(), 'only required functions; no ambient host operations');
@@ -179,15 +179,18 @@ function operationOk(out) {
         }
         data().setBigUint64(out + 32, 0xfedcba9876543210n, true);
     } },
-    [privateBytes]: { create: (at, len, mediaAt, mediaLen, jpeg, jpegLen, out) => {
+    [references]: { create: (at, len, mediaAt, mediaLen, jpeg, jpegLen, out) => {
         assert.equal(out % 4, 0);
         assert.equal(emitted.at(-1).method, 'Target.detachFromTarget');
         assert.equal(received.length, 0, 'detach acknowledged before staging');
-        stagedBytes.push({ variable: text(at, len), media_type: text(mediaAt, mediaLen), jpeg: Buffer.from(bytes(jpeg, jpegLen)) });
+        const id = `ref_mock_${String(stagedBytes.length + 1).padStart(16, '0')}`;
+        stagedBytes.push({ title: text(at, len), media_type: text(mediaAt, mediaLen), jpeg: Buffer.from(bytes(jpeg, jpegLen)), id });
         bytes(out, 12).fill(0);
         if (rejectPrivateBytes) {
             data().setUint8(out, 1);
             putText(out + 4, 'private fixture diagnostics');
+        } else {
+            putText(out + 4, id);
         }
     } },
     [webTransport]: {
@@ -370,14 +373,14 @@ assert.deepEqual(jsTimeout, { type: 'integer', minimum: 1, maximum: 2000, defaul
 assert.deepEqual(agent.tools.map(tool => tool.name), expectedTools);
 assert.deepEqual(agent.tools.map(tool => tool.parameters.required), [
     ['endpoint'], [], [], ['page_ref'], ['page_ref', 'element_ref'], ['page_ref', 'element_ref', 'text'], ['page_ref', 'url'],
-    ['page_ref', 'variable'], ['page_ref', 'element_ref', 'key'], [], ['page_ref'], ['page_ref', 'action'],
+    ['page_ref'], ['page_ref', 'element_ref', 'key'], [], ['page_ref'], ['page_ref', 'action'],
     ['page_ref'], ['page_ref', 'delta_y'], ['page_ref'], ['page_ref', 'element_ref', 'checked'],
     ['page_ref', 'element_ref', 'value'], ['page_ref', 'timeout_ms', 'condition'], ['page_ref'], ['page_ref', 'tool_ref', 'input'],
     ['page_ref', 'network_enabled'], ['page_ref', 'record_id'], ['page_ref', 'expression'],
 ].map((required, index) => index ? ['connect_id', ...required] : required));
 assert.deepEqual(Object.keys(agent.tools[3].parameters.properties), ['connect_id', 'page_ref', 'region_ref']);
 const framing = agent.tools[7].parameters.properties;
-assert.deepEqual(Object.keys(framing), ['connect_id', 'page_ref', 'variable', 'clip', 'scale', 'quality']);
+assert.deepEqual(Object.keys(framing), ['connect_id', 'page_ref', 'title', 'clip', 'scale', 'quality']);
 assert.equal(framing.clip.additionalProperties, false);
 assert.deepEqual(framing.clip.required, ['x', 'y', 'width', 'height']);
 assert.deepEqual(framing.clip.properties, {
@@ -397,7 +400,6 @@ assert.deepEqual(agent.tool_bindings, Object.fromEntries(expectedTools.map(name 
     web: name === 'connect'
         ? { kind: 'open', endpoint: '/endpoint', handoff: true }
         : { kind: 'existing', connection: '/connect_id', send: name !== 'status' },
-    ...(name === 'screenshot' ? { private_bytes: '/variable' } : {}),
     exact_arguments: name === 'execute_js' ? ['/world', '/expression', '/page_ref'] : ['navigate', 'new_tab'].includes(name) ? ['/url'] : [],
 }])));
 for (const tool of agent.tools.slice(1)) assert.deepEqual(tool.parameters.properties.connect_id, connectIdSchema);
@@ -606,11 +608,11 @@ function framedJpeg(len) {
     jpeg.set([0xff, 0xd9], len - 2);
     return jpeg;
 }
-const destination = { page_ref, variable: 'shot.test-1' };
+const destination = { page_ref, title: 'shot.test-1' };
 assert.equal(onConnection('screenshot', { ...destination, path: 'no.jpg' }).code, 'invalid_request');
-assert.equal(onConnection('screenshot', { page_ref }).code, 'invalid_request');
-assert.equal(onConnection('screenshot', { ...destination, variable: null }).code, 'invalid_request');
-assert.equal(onConnection('screenshot', { ...destination, variable: 'injection}}' }).code, 'invalid_variable');
+assert.equal(onConnection('screenshot', {}).code, 'invalid_request');
+assert.equal(onConnection('screenshot', { ...destination, title: null }).code, 'invalid_request');
+assert.equal(onConnection('screenshot', { ...destination, title: '' }).code, 'invalid_title');
 assert.deepEqual(stagedBytes, []);
 const priorCommands = emitted.length;
 const testClip = { x: 12.25, y: 20, width: 200, height: 100 };
@@ -628,12 +630,11 @@ admittedMode = 'observe';
 const jpeg = framedJpeg(112 * 1024);
 received.push(...screenshotReplies(24, jpeg));
 assert.deepEqual(onConnection('screenshot', destination), {
-    storage: 'session_bytes', variable: destination.variable, media_type: 'image/jpeg', bytes: jpeg.length, width: 32, height: 16,
-    image_url: '{{var:base64:shot.test-1}}',
+    storage: 'personal_library', id: 'ref_mock_0000000000000001', title: destination.title, media_type: 'image/jpeg', bytes: jpeg.length, width: 32, height: 16,
 });
 assert.deepEqual(emitted.slice(-4).map(cmd => cmd.method), ['Target.getTargets', 'Target.attachToTarget', 'Page.captureScreenshot', 'Target.detachFromTarget']);
 assert.deepEqual(emitted.at(-2).params, { format: 'jpeg', quality: 55, fromSurface: true, captureBeyondViewport: false });
-assert.deepEqual(stagedBytes, [{ variable: destination.variable, media_type: 'image/jpeg', jpeg }]);
+assert.deepEqual(stagedBytes, [{ title: destination.title, media_type: 'image/jpeg', jpeg, id: 'ref_mock_0000000000000001' }]);
 assert.equal(received.length, 0);
 received.push(...screenshotReplies(28, framedJpeg(jpeg.length + 1)));
 const jpegLimit = onConnection('screenshot', destination);
@@ -648,7 +649,7 @@ assert.equal(stagedBytes.length, 1);
 rejectPrivateBytes = true;
 received.push(...screenshotReplies(36, framedJpeg(17)));
 const rejection = onConnection('screenshot', destination);
-assert.equal(rejection.code, 'private_bytes_rejected');
+assert.equal(rejection.code, 'reference_rejected');
 assert(!rejection.message.includes('fixture diagnostics'));
 assert.equal(stagedBytes.length, 2);
 rejectPrivateBytes = false;

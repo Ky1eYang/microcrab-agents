@@ -54,7 +54,7 @@ fn recordCheckpoint(_: *anyopaque, event: observation.Checkpoint) void {
 const host_info_module = "microcrab:agent/host-info@0.9.0";
 const execution_module = "microcrab:agent/execution@0.9.0";
 const variables_module = "microcrab:session/variables@0.2.0";
-const private_bytes_module = "microcrab:session/private-bytes@0.2.1";
+const references_module = "microcrab:session/references@0.3.0";
 const transport_module = "microcrab:host/web-transport@0.1.0";
 const scoped_transport_module = "microcrab:host/web-transport-scoped@0.1.1";
 
@@ -106,7 +106,7 @@ export fn invoke(info_at: u32, info_len: u32, name_at: u32, name_len: u32, args_
         return result;
     };
     const mode = if (ready and catalog.needsToolCallFacts(name)) admittedMode() else null;
-    switch (guest.invoke(&browser, transport, createPrivateBytes, a, memory.allocator, ready, mode, name, args)) {
+    switch (guest.invoke(&browser, transport, createReference, a, memory.allocator, ready, mode, name, args)) {
         .ok => |text| {
             if (std.mem.eql(u8, name, "connect")) {
                 if (startConnectionJob(a, browser.handle())) |buffer| {
@@ -309,12 +309,12 @@ fn admittedMode() ?[]const u8 {
     }
 }
 
-fn createPrivateBytes(name: []const u8, media_type: []const u8, jpeg: []const u8) bool {
-    // result<_, string>: discriminant at 0, error string at 4 (memory32).
+fn createReference(alloc: Allocator, title: []const u8, media_type: []const u8, jpeg: []const u8) guest.ReferenceResult {
+    // result<string, string>: discriminant at 0, string at 4 (memory32).
     var out: [12]u8 align(4) = undefined;
-    import(fn (u32, u32, u32, u32, u32, u32, u32) callconv(.C) void, private_bytes_module, "create")(
-        ptr(name),
-        name.len,
+    import(fn (u32, u32, u32, u32, u32, u32, u32) callconv(.C) void, references_module, "create")(
+        ptr(title),
+        title.len,
         ptr(media_type),
         media_type.len,
         ptr(jpeg),
@@ -322,10 +322,15 @@ fn createPrivateBytes(name: []const u8, media_type: []const u8, jpeg: []const u8
         ptr(&out),
     );
     return switch (out[0]) {
-        0 => true,
-        1 => denied: {
+        0 => ok: {
+            const raw = wireText(out[4..]);
+            defer release(raw, 1);
+            const copy = alloc.dupe(u8, raw) catch return .{ .err = "Out of memory storing reference ID." };
+            break :ok .{ .ok = copy };
+        },
+        1 => rejected: {
             releaseText(out[4..]); // Never expose an unchecked Runtime message.
-            break :denied false;
+            break :rejected .{ .err = "Reference rejected." };
         },
         else => @trap(),
     };

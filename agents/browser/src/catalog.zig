@@ -6,13 +6,6 @@ const Allocator = std.mem.Allocator;
 pub const max_host_info_bytes = 32 * 1024;
 const max_args_bytes = 6 * @max(observation.max_endpoint_bytes, observation.max_navigation_url_bytes, observation.max_input_text_bytes) + 128;
 pub const Tool = enum { connect, status, list_pages, snapshot, click, type_text, navigate, screenshot, press_key, new_tab, select_tab, history_navigation, close_tab, scroll, find, set_checked, select_option, wait_for, webmcp_list, webmcp_invoke, configure_connection, read_network_detail, execute_js };
-const max_destination_bytes = 128;
-pub fn validVariable(name: []const u8) bool {
-    if (name.len == 0 or name.len > max_destination_bytes) return false;
-    if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') return false;
-    for (name[1..]) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '.' and c != '-') return false;
-    return true;
-}
 pub const Arguments = union(Tool) {
     connect: []const u8,
     status: void,
@@ -48,7 +41,7 @@ const Wait = struct { page_ref: []const u8, timeout_ms: StrictField(u16), condit
 const PageSelection = struct { page_ref: []const u8 };
 const History = struct { page_ref: []const u8, action: observation.HistoryAction };
 const PressKey = struct { page_ref: []const u8, element_ref: []const u8, key: []const u8, modifiers: []const observation.Modifier = &.{} };
-const Screenshot = struct { page_ref: []const u8, variable: []const u8, options: observation.ScreenshotOptions };
+const Screenshot = struct { page_ref: []const u8, title: ?[]const u8 = null, options: observation.ScreenshotOptions };
 
 // Zig's JSON decoder normally coerces string tokens into numbers and treats
 // explicit null as omitted for optional fields. Require the exact field type
@@ -72,7 +65,7 @@ fn StrictField(comptime T: type) type {
 
 const ScreenshotJson = struct {
     page_ref: []const u8,
-    variable: []const u8,
+    title: StrictField([]const u8) = .{},
     clip: StrictField(struct {
         x: StrictField(f64),
         y: StrictField(f64),
@@ -83,7 +76,7 @@ const ScreenshotJson = struct {
     quality: StrictField(u8) = .{},
 
     fn arguments(self: ScreenshotJson) Screenshot {
-        return .{ .page_ref = self.page_ref, .variable = self.variable, .options = .{
+        return .{ .page_ref = self.page_ref, .title = self.title.value, .options = .{
             .clip = if (self.clip.value) |clip| .{ .x = clip.x.value.?, .y = clip.y.value.?, .width = clip.width.value.?, .height = clip.height.value.? } else null,
             .scale = self.scale.value,
             .quality = self.quality.value orelse observation.default_jpeg_quality,
@@ -318,7 +311,6 @@ const ToolBinding = struct {
         connection: ?[]const u8 = null,
         send: ?bool = null,
     },
-    private_bytes: ?[]const u8 = null,
     exact_arguments: []const []const u8 = &.{},
 };
 const ToolBindings = std.enums.EnumFieldStruct(Tool, ToolBinding, null);
@@ -332,7 +324,6 @@ fn toolBindings() ToolBindings {
         else
             .{
                 .web = .{ .kind = .existing, .connection = "/" ++ connect_id_field, .send = name != .status },
-                .private_bytes = if (name == .screenshot) "/variable" else null,
                 .exact_arguments = switch (name) {
                     .navigate, .new_tab => &.{"/url"},
                     .execute_js => &.{ "/world", "/expression", "/page_ref" },
@@ -385,10 +376,10 @@ pub fn describe(alloc: Allocator) ![]const u8 {
             tool(.click, "Interaction only. Send one synthetic click to a current element_ref from snapshot on the specified page. Does not guarantee the site's response.", schema(.{ .connect_id = ConnectIdSchema{}, .page_ref = RefSchema{}, .element_ref = RefSchema{} }, &.{ connect_id_field, "page_ref", "element_ref" })),
             tool(.type_text, "Interaction only. Replace text in a current editable element_ref from snapshot on the specified page using synthetic DOM input; does not explicitly submit the form.", schema(.{ .connect_id = ConnectIdSchema{}, .page_ref = RefSchema{}, .element_ref = RefSchema{}, .text = BoundedString{ .minLength = 0, .maxLength = observation.max_input_text_bytes } }, &.{ connect_id_field, "page_ref", "element_ref", "text" })),
             tool(.navigate, "Interaction only. Navigate the specified page to an explicit HTTP(S) URL in the same tab.", schema(.{ .connect_id = ConnectIdSchema{}, .page_ref = RefSchema{}, .url = BoundedString{ .maxLength = observation.max_navigation_url_bytes } }, &.{ connect_id_field, "page_ref", "url" })),
-            tool(.screenshot, "Capture a JPEG from the current viewport into a new private Session Bytes variable. Optional clip uses viewport-relative CSS pixels; scale reduces native output dimensions without changing viewport settings. Use a smaller clip, lower scale or lower JPEG quality to reduce size. Returns metadata and a view_image URL, never pixel data or a file.", schema(.{
+            tool(.screenshot, "Capture a JPEG from the current viewport into the user Personal Content Library mounted in this Session. Optional clip uses viewport-relative CSS pixels; scale reduces native output dimensions without changing viewport settings. Use a smaller clip, lower scale or lower JPEG quality to reduce size. Returns reference metadata and ref_ id (use reference.expand or {{ref:base64:<id>}} / {{ref:data_url:<id>}}), never raw pixel data.", schema(.{
                 .connect_id = ConnectIdSchema{},
                 .page_ref = RefSchema{},
-                .variable = .{ .type = "string", .pattern = "^[A-Za-z_][A-Za-z0-9_.-]{0,127}$", .maxLength = max_destination_bytes },
+                .title = BoundedString{ .maxLength = 256 },
                 .clip = schema(.{
                     .x = .{ .type = "number", .minimum = 0 },
                     .y = .{ .type = "number", .minimum = 0 },
@@ -397,7 +388,7 @@ pub fn describe(alloc: Allocator) ![]const u8 {
                 }, &.{ "x", "y", "width", "height" }),
                 .scale = .{ .type = "number", .minimum = @as(f64, observation.min_screenshot_scale), .maximum = 1, .default = 1, .description = "Output multiplier relative to native device pixels; values below 1 reduce resolution." },
                 .quality = .{ .type = "integer", .minimum = 0, .maximum = 100, .default = observation.default_jpeg_quality },
-            }, &.{ connect_id_field, "page_ref", "variable" })),
+            }, &.{ connect_id_field, "page_ref" })),
             tool(.press_key, "Interaction only. Dispatch synthetic keydown and keyup to a current element_ref; sites may ignore them. Does not insert text or invoke browser or OS shortcuts. Use one printable ASCII character (including a literal space) or a supported named key.", schema(.{
                 .connect_id = ConnectIdSchema{},
                 .page_ref = RefSchema{},
@@ -567,9 +558,7 @@ test "Browser catalog matches the generic capability binding contract" {
             try std.testing.expectEqualStrings("/connect_id", web.get("connection").?.string);
             try std.testing.expectEqual(name != .status, web.get("send").?.bool);
         }
-        if (name == .screenshot) {
-            try std.testing.expectEqualStrings("/variable", binding.get("private_bytes").?.string);
-        } else try std.testing.expect(!binding.contains("private_bytes"));
+        try std.testing.expect(!binding.contains("private_bytes"));
         const exact = binding.get("exact_arguments").?.array.items;
         if (name == .navigate or name == .new_tab) {
             try std.testing.expectEqual(@as(usize, 1), exact.len);

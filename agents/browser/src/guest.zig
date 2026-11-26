@@ -12,9 +12,10 @@ pub const Failure = struct {
 pub const Outcome = union(enum) { ok: []const u8, fail: Failure };
 const max_encoded_final = 48 * 1024;
 
-pub const CreatePrivateBytes = *const fn (name: []const u8, media_type: []const u8, data: []const u8) bool;
+pub const ReferenceResult = union(enum) { ok: []const u8, err: []const u8 };
+pub const CreateReference = *const fn (alloc: Allocator, title: []const u8, media_type: []const u8, data: []const u8) ReferenceResult;
 
-pub fn invoke(state: *observation.Browser, transport: observation.Transport, create_private_bytes: CreatePrivateBytes, alloc: Allocator, persistent: Allocator, compatible: bool, mode: ?[]const u8, name: []const u8, raw: []const u8) Outcome {
+pub fn invoke(state: *observation.Browser, transport: observation.Transport, create_reference: CreateReference, alloc: Allocator, persistent: Allocator, compatible: bool, mode: ?[]const u8, name: []const u8, raw: []const u8) Outcome {
     const bound = catalog.extractConnection(alloc, name, raw) catch {
         return fail("invalid_request", "Pass the exact connect_id returned by connect to every follow-up Browser tool.");
     };
@@ -38,7 +39,7 @@ pub fn invoke(state: *observation.Browser, transport: observation.Transport, cre
     }
     const outcome = switch (args) {
         .configure_connection, .read_network_detail => invokeNetwork(state, transport, alloc, persistent, args),
-        else => invokeTool(state, transport, create_private_bytes, alloc, args),
+        else => invokeTool(state, transport, create_reference, alloc, args),
     };
     // Failed validation/discovery may leave the previous generation alive.
     // The connect invocation is not authorized to pull from that predecessor.
@@ -72,7 +73,7 @@ pub fn invokeNetwork(state: *observation.Browser, transport: observation.Transpo
     }
 }
 
-fn invokeTool(state: *observation.Browser, transport: observation.Transport, create_private_bytes: CreatePrivateBytes, alloc: Allocator, args: catalog.Arguments) Outcome {
+fn invokeTool(state: *observation.Browser, transport: observation.Transport, create_reference: CreateReference, alloc: Allocator, args: catalog.Arguments) Outcome {
     const text = switch (args) {
         .configure_connection, .read_network_detail => unreachable,
         .webmcp_list => |arg| encodeWebMcp(alloc, state.webMcp(transport, alloc, arg.page_ref, .list) catch |err| return browserFailure(err)),
@@ -106,14 +107,17 @@ fn invokeTool(state: *observation.Browser, transport: observation.Transport, cre
         .select_option => |args_| encode(alloc, state.selectOption(transport, alloc, args_.page_ref, args_.element_ref, args_.value) catch |err| return browserFailure(err)),
         .wait_for => |args_| encode(alloc, state.waitFor(transport, alloc, args_.page_ref, std.meta.stringToEnum(observation.WaitCondition, args_.condition).?, args_.element_ref.value, args_.timeout_ms.value.?) catch |err| return browserFailure(err)),
         .screenshot => |args_| blk: {
-            if (!catalog.validVariable(args_.variable)) return fail("invalid_variable", "Name an exact private Session Bytes variable.");
+            const title = args_.title orelse "browser screenshot";
+            if (title.len == 0 or title.len > 256) return fail("invalid_title", "Screenshot title must be 1..=256 bytes.");
             const jpeg = state.screenshot(transport, alloc, args_.page_ref, args_.options) catch |err| return browserFailure(err);
             if (state.timedOut()) return browserFailure(error.SettledTimeout);
             const media_type = "image/jpeg";
-            const image_url = std.fmt.allocPrint(alloc, "{{{{var:base64:{s}}}}}", .{args_.variable}) catch return browserFailure(error.OutOfMemory);
             const dimensions = jpegDimensions(jpeg) orelse return browserFailure(error.InvalidScreenshot);
-            const receipt = encode(alloc, .{ .storage = "session_bytes", .variable = args_.variable, .media_type = media_type, .bytes = jpeg.len, .width = dimensions.width, .height = dimensions.height, .image_url = image_url }) catch return fail("limit", "Browser result exceeds its output limit.");
-            if (!create_private_bytes(args_.variable, media_type, jpeg)) return fail("private_bytes_rejected", "Runtime did not stage the screenshot for that private Session variable.");
+            const ref_id = switch (create_reference(alloc, title, media_type, jpeg)) {
+                .ok => |id| id,
+                .err => |_| return fail("reference_rejected", "Runtime did not stage the screenshot in the Personal Content Library."),
+            };
+            const receipt = encode(alloc, .{ .storage = "personal_library", .id = ref_id, .title = title, .media_type = media_type, .bytes = jpeg.len, .width = dimensions.width, .height = dimensions.height }) catch return fail("limit", "Browser result exceeds its output limit.");
             break :blk receipt;
         },
     } catch return fail("limit", "Browser result exceeds its output limit.");

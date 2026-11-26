@@ -157,21 +157,23 @@ JSON; skipping a payload does not replenish raw allowances.
   `Control`, `Alt`, `Shift`, and `Meta` flags. This does not insert text or
   invoke browser/OS shortcuts; the page may ignore the events. If the target
   moves or disappears after keydown, do not assume keyup ran or replay the call.
-- `screenshot(page_ref, variable, clip?, scale?, quality?)` captures a JPEG into
-  one new private ephemeral Session Bytes variable. With no framing options it
-  uses the original viewport capture. JPEG `quality` is an integer from `0` to
-  `100` (default `55`), and changing it alone preserves the original framing.
-  `clip` is `{x, y, width, height}` in CSS pixels relative to the top left of the
-  current **visual viewport**, including on a scrolled page. The whole clip must
-  fit inside the viewport. `scale` is an output multiplier from `0.1` to `1`
-  (default `1`); it applies to native device-pixel dimensions, not CSS pixel
-  dimensions. For example, a 320×240 CSS clip at `0.5` gives 160×120 at DPR 1
-  and 320×240 at DPR 2. The Browser guest sends no resize or emulation commands
-  and does not take full-page screenshots. Framing requires Chrome to report
-  valid viewport geometry, 100% browser zoom and no pinch zoom. A framed output
-  must be at least one scaled CSS pixel per side and at most 16,777,216 scaled
-  square CSS pixels, before device scaling.
-- Screenshot metadata includes `image_url` for an explicit `view_image` call;
+- `screenshot(page_ref, title?, clip?, scale?, quality?)` captures a JPEG into
+  the user's Personal Content Library via `microcrab:session/references@0.3.0` and
+  mounts its reference (`ref_...`) in the current Session. With no framing
+  options it uses the original viewport capture. JPEG `quality` is an integer
+  from `0` to `100` (default `55`), and changing it alone preserves the original
+  framing. `clip` is `{x, y, width, height}` in CSS pixels relative to the top
+  left of the current **visual viewport**, including on a scrolled page. The
+  whole clip must fit inside the viewport. `scale` is an output multiplier from
+  `0.1` to `1` (default `1`); it applies to native device-pixel dimensions, not
+  CSS pixel dimensions. For example, a 320×240 CSS clip at `0.5` gives 160×120
+  at DPR 1 and 320×240 at DPR 2. The Browser guest sends no resize or emulation
+  commands and does not take full-page screenshots. Framing requires Chrome to
+  report valid viewport geometry, 100% browser zoom and no pinch zoom. A framed
+  output must be at least one scaled CSS pixel per side and at most 16,777,216
+  scaled square CSS pixels, before device scaling.
+- Screenshot metadata includes the minted `id` (`ref_...`) and summary metadata
+  for explicit inspection with `reference(action="expand")` or Markdown `ref:` links;
   the tool does not write a workspace file or put pixels in its response. The
   existing 256 KiB wire-message limit and 112 KiB decoded JPEG limit are unchanged.
   Neither failure saves an image or retries automatically. For `screenshot_limit`,
