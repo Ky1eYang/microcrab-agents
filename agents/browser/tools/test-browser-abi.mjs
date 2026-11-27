@@ -6,8 +6,7 @@ const source = await readFile(process.argv[2]);
 const module = await WebAssembly.compile(source);
 const hostInfo = 'microcrab:agent/host-info@0.9.0';
 const execution = 'microcrab:agent/execution@0.9.0';
-const variables = 'microcrab:session/variables@0.2.0';
-const references = 'microcrab:session/references@0.3.0';
+const session = 'microcrab:session/session@0.4.0';
 const observer = 'microcrab:session/observation@0.2.2';
 const debugObservation = process.argv.includes('--debug-observation');
 const observations = [];
@@ -19,9 +18,9 @@ const scopedWeb = 'microcrab:host/web-transport-scoped@0.1.1';
 const scopedNames = ['ws-pull', 'ws-budget', 'ws-settle'];
 const importKeys = WebAssembly.Module.imports(module).map(({module, name, kind}) => `${module}:${name}:${kind}`).sort();
 assert.deepEqual(importKeys, [
-    `${hostInfo}:host-info:function`, `${variables}:tool-call-facts:function`,
+    `${hostInfo}:host-info:function`, `${session}:eval:function`,
     ...['create', 'append', 'finish', 'attach-guest', '[resource-drop]buffer'].map(name => `${execution}:${name}:function`),
-    `${references}:create:function`, `${observer}:record-event:function`, ...webNames.map(name => `${webTransport}:${name}:function`),
+    `${observer}:record-event:function`, ...webNames.map(name => `${webTransport}:${name}:function`),
     ...scopedNames.map(name => `${scopedWeb}:${name}:function`),
     ...(debugObservation ? [`${browserObserver}:record-checkpoint:function`] : []),
 ].sort(), 'only required functions; no ambient host operations');
@@ -162,36 +161,48 @@ function operationOk(out) {
         assert(args.every(Number.isInteger));
         checkpoints.push(args);
     } },
-    [variables]: { 'tool-call-facts': out => {
-        assert.equal(out % 8, 0);
-        factsCalls++;
-        bytes(out, 40).fill(0);
-        if (admittedMode === undefined) {
-            data().setUint8(out, 1); // Err
-            data().setUint8(out + 8, 1); // communication-error-code::unavailable
-            putText(out + 12, 'no admitted tool invocation');
+    [session]: { eval: (scriptAt, scriptLen, argsTag, argsAt, argsLen, out) => {
+        assert.equal(out % 4, 0);
+        const script = text(scriptAt, scriptLen);
+        bytes(out, 16).fill(0);
+        if (script === 'vars::call_facts()') {
+            assert.equal(argsTag, 0);
+            factsCalls++;
+            if (admittedMode === undefined) {
+                data().setUint8(out, 1); // Err
+                data().setUint8(out + 4, 1); // error-code::unavailable
+                putText(out + 8, 'no admitted tool invocation');
+                return;
+            }
+            putText(out + 4, JSON.stringify({
+                session_id: 'synthetic-session-🦀',
+                admitted_mode: admittedMode,
+                observed_at_unix_ms: 0x123456789abc,
+            }));
             return;
         }
-        putText(out + 8, 'synthetic-session-🦀');
-        if (admittedMode !== null) {
-            data().setUint8(out + 16, 1);
-            putText(out + 20, admittedMode);
+        if (script === 'refs::create_base64(args.title, args.media_type, args.data)') {
+            assert.equal(argsTag, 1);
+            assert.equal(emitted.at(-1).method, 'Target.detachFromTarget');
+            assert.equal(received.length, 0, 'detach acknowledged before staging');
+            const parsed = JSON.parse(text(argsAt, argsLen));
+            const id = `ref_mock_${String(stagedBytes.length + 1).padStart(16, '0')}`;
+            stagedBytes.push({
+                title: parsed.title,
+                media_type: parsed.media_type,
+                jpeg: Buffer.from(parsed.data, 'base64'),
+                id,
+            });
+            if (rejectPrivateBytes) {
+                data().setUint8(out, 1);
+                data().setUint8(out + 4, 3); // error-code::invalid-argument
+                putText(out + 8, 'private fixture diagnostics');
+            } else {
+                putText(out + 4, JSON.stringify(id));
+            }
+            return;
         }
-        data().setBigUint64(out + 32, 0xfedcba9876543210n, true);
-    } },
-    [references]: { create: (at, len, mediaAt, mediaLen, jpeg, jpegLen, out) => {
-        assert.equal(out % 4, 0);
-        assert.equal(emitted.at(-1).method, 'Target.detachFromTarget');
-        assert.equal(received.length, 0, 'detach acknowledged before staging');
-        const id = `ref_mock_${String(stagedBytes.length + 1).padStart(16, '0')}`;
-        stagedBytes.push({ title: text(at, len), media_type: text(mediaAt, mediaLen), jpeg: Buffer.from(bytes(jpeg, jpegLen)), id });
-        bytes(out, 12).fill(0);
-        if (rejectPrivateBytes) {
-            data().setUint8(out, 1);
-            putText(out + 4, 'private fixture diagnostics');
-        } else {
-            putText(out + 4, id);
-        }
+        assert.fail(`unexpected session eval script: ${script}`);
     } },
     [webTransport]: {
         'http-get': transport('http-get', (at, len, cap, out) => {
@@ -650,7 +661,7 @@ rejectPrivateBytes = true;
 received.push(...screenshotReplies(36, framedJpeg(17)));
 const rejection = onConnection('screenshot', destination);
 assert.equal(rejection.code, 'reference_rejected');
-assert(!rejection.message.includes('fixture diagnostics'));
+assert(rejection.message.includes('private fixture diagnostics'));
 assert.equal(stagedBytes.length, 2);
 rejectPrivateBytes = false;
 
@@ -800,21 +811,27 @@ assert.deepEqual(onConnection('history_navigation', { page_ref: explicit.page_re
 });
 assert.equal(emitted.at(-2).method, 'Page.reload');
 assert.deepEqual(emitted.at(-2).params, { loaderId: 'example-loader' });
-for (const [history, outcome] of [
-    [{ currentIndex: 2, entries }, 'history_boundary'],
-    [{ currentIndex: 1, entries: [...entries.slice(0, 2), { ...entries[2], url: 'chrome://settings/private' }] }, 'history_navigation_rejected'],
-]) {
-    historySetup(history);
-    browserReply({});
-    assert.deepEqual(onConnection('history_navigation', { page_ref: explicit.page_ref, action: 'forward' }), { outcome, page_ref: explicit.page_ref, action: 'forward' });
-    assert.deepEqual(emitted.slice(-2).map(cmd => cmd.method), ['Page.getNavigationHistory', 'Target.detachFromTarget']);
-}
+historySetup({ currentIndex: 2, entries });
+browserReply({});
+assert.deepEqual(onConnection('history_navigation', { page_ref: explicit.page_ref, action: 'forward' }), { outcome: 'history_boundary', page_ref: explicit.page_ref, action: 'forward' });
+assert.deepEqual(emitted.slice(-2).map(cmd => cmd.method), ['Page.getNavigationHistory', 'Target.detachFromTarget']);
+historySetup({ currentIndex: 1, entries: [...entries.slice(0, 2), { ...entries[2], url: 'chrome://settings/private' }] });
+browserReply({});
+const historyRejected = onConnection('history_navigation', { page_ref: explicit.page_ref, action: 'forward' });
+assert.equal(historyRejected.code, 'history_navigation_rejected');
+assert(historyRejected.message.includes('chrome://settings/private'));
+assert.deepEqual(emitted.slice(-2).map(cmd => cmd.method), ['Page.getNavigationHistory', 'Target.detachFromTarget']);
+
 browserReply({ targetInfos: [{ ...tabs[1], url: 'chrome://settings' }] });
-assert.deepEqual(onConnection('navigate', { page_ref: explicit.page_ref, url: tabs[1].url }), { error: 'navigation_rejected' });
+const navRejected = onConnection('navigate', { page_ref: explicit.page_ref, url: tabs[1].url });
+assert.equal(navRejected.code, 'navigation_rejected');
+assert(navRejected.message.includes('chrome://settings'));
 assert.equal(emitted.at(-1).method, 'Target.getTargets', 'protected source tab never attaches');
 assert.deepEqual(onConnection('status'), { status: 'connected' });
 received.push({ id: nextId++, error: { code: -32602, message: 'private CDP diagnostics' } });
-assert.deepEqual(onConnection('new_tab'), { outcome: 'tab_creation_rejected' });
+const newTabRejected = onConnection('new_tab');
+assert.equal(newTabRejected.code, 'tab_creation_rejected');
+assert(newTabRejected.message.includes('-32602') && newTabRejected.message.includes('private CDP diagnostics'));
 assert.equal(received.length, 0);
 
 // WebMCP uses a separate flattened page attachment and only typed CDP.
@@ -997,12 +1014,14 @@ assert(findCall.params.functionDeclaration === waitCall.params.functionDeclarati
 }
 for (const targetInfos of [[tabs[1]], [tabs[0], { ...tabs[1], url: 'chrome://settings' }], [tabs[0], { ...tabs[1], subtype: 'prerender' }]]) {
     browserReply({ targetInfos });
-    assert.deepEqual(onConnection('close_tab', scopedBase), { outcome: 'tab_close_blocked', ...scopedBase });
+    assert.equal(onConnection('close_tab', scopedBase).code, 'tab_close_blocked');
     assert.equal(emitted.at(-1).method, 'Target.getTargets');
 }
 browserReply({ targetInfos: tabs });
 received.push({ id: nextId++, error: { code: -32000, message: 'private CDP diagnostics' } });
-assert.deepEqual(onConnection('close_tab', scopedBase), { outcome: 'tab_close_rejected', ...scopedBase });
+const closeRejected = onConnection('close_tab', scopedBase);
+assert.equal(closeRejected.code, 'tab_close_rejected');
+assert(closeRejected.message.includes('private CDP diagnostics'));
 browserReply({ targetInfos: tabs });
 browserReply({ success: true });
 assert.deepEqual(onConnection('close_tab', scopedBase), { outcome: 'tab_close_requested', ...scopedBase });
@@ -1104,7 +1123,7 @@ rejectAttach = true;
 received.push(version);
 const rejectedJob = invoke('connect', { endpoint: url });
 assert.equal(rejectedJob.code, 'connection_job_failed');
-assert(!rejectedJob.message.includes('fixture-only'));
+assert(rejectedJob.message.includes('fixture-only attach diagnostics'));
 assert(jobs.get(nextBuffer).ownedDropped, 'failed handoff drops its owned buffer');
 assert(!active, 'failed handoff retires the opened socket');
 rejectAttach = false;
@@ -1275,7 +1294,9 @@ assert.deepEqual(onConnection('execute_js', jsArgs), { outcome: 'execution_timed
 jsSetup('isolated');
 received.push({ id: nextId++, sessionId: 'wrong-session', result: { result: { type: 'undefined' } } });
 const sentBeforeUnknown = emitted.length;
-assert.equal(onConnection('execute_js', jsArgs).code, 'outcome_unknown');
+const unknownEval = onConnection('execute_js', jsArgs);
+assert.equal(unknownEval.code, 'outcome_unknown');
+assert(unknownEval.message.includes('Cause: '), `expected diagnostic Cause in ${unknownEval.message}`);
 assert.equal(emitted.slice(sentBeforeUnknown).filter(cmd => cmd.method === 'Runtime.evaluate').length, 1);
 assert.equal(onConnection('execute_js', jsArgs).code, 'stale_connection');
 assert.equal(emitted.at(-1).method, 'Runtime.evaluate', 'unknown effect never resubmits or implicitly reconnects');

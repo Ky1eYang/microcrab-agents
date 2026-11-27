@@ -1,7 +1,7 @@
 package microcrab:coding@0.5.0;
 world coding {
   include microcrab:agent/agent@0.9.0;
-  import microcrab:session/variables@0.2.0;
+  import microcrab:session/session@0.4.0;
   import microcrab:session/file-versions@0.2.0;
   import microcrab:host/cache-points@0.1.0;
   import microcrab:host/glob-ignore@0.1.0;

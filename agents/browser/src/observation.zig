@@ -134,6 +134,11 @@ pub const Error = TransportError || endpoint.Error || error{
     NotActionable,
     ProjectionUnavailable,
     NavigationRejected,
+    TabCreationRejected,
+    TabActivationRejected,
+    TabCloseRejected,
+    TabCloseBlocked,
+    HistoryNavigationRejected,
     JsExecutionTimedOut,
     JsOutputLimit,
 };
@@ -170,13 +175,21 @@ pub const Transport = struct {
     scoped: ?ScopedTransport = null,
 };
 
+pub const JpegDimensions = struct { width: u16, height: u16 };
+pub const ScreenshotCapture = struct {
+    base64: []const u8,
+    bytes: usize,
+    width: u16,
+    height: u16,
+};
+
 pub const Status = enum { connected, disconnected, stale, closed };
 pub const PageRef = [32]u8;
 pub const HistoryAction = enum { reload, back, forward };
-pub const NewTabReceipt = struct { outcome: enum { tab_created, tab_creation_rejected }, page_ref: ?PageRef = null };
-pub const CloseTabReceipt = struct { outcome: enum { tab_close_requested, tab_close_rejected, tab_close_blocked }, page_ref: PageRef };
-pub const SelectTabReceipt = struct { outcome: enum { tab_activation_requested, tab_activation_rejected }, page_ref: PageRef };
-const HistoryOutcome = enum { history_navigation_requested, history_navigation_rejected, history_boundary };
+pub const NewTabReceipt = struct { outcome: enum { tab_created }, page_ref: PageRef };
+pub const CloseTabReceipt = struct { outcome: enum { tab_close_requested }, page_ref: PageRef };
+pub const SelectTabReceipt = struct { outcome: enum { tab_activation_requested }, page_ref: PageRef };
+const HistoryOutcome = enum { history_navigation_requested, history_boundary };
 pub const HistoryReceipt = struct { outcome: HistoryOutcome, page_ref: PageRef, action: HistoryAction };
 pub const Page = struct { ref: PageRef, title: []const u8, url: []const u8 };
 pub const Pages = struct { pages: []const Page, omitted_pages: usize, fields_truncated: bool };
@@ -204,6 +217,31 @@ pub const Browser = struct {
     tool_active: bool = false,
     soft_timed_out: bool = false,
     exchange_count: u8 = 0,
+    last_failure_buf: [2048]u8 = undefined,
+    last_failure_len: usize = 0,
+
+    pub fn lastFailure(self: *const Browser) []const u8 {
+        return self.last_failure_buf[0..self.last_failure_len];
+    }
+
+    pub fn clearFailure(self: *Browser) void {
+        self.last_failure_len = 0;
+    }
+
+    fn setFailure(self: *Browser, comptime fmt: []const u8, args: anytype) void {
+        if (std.fmt.bufPrint(&self.last_failure_buf, fmt, args)) |written| {
+            self.last_failure_len = written.len;
+        } else |_| {
+            const suffix = "...";
+            const keep = self.last_failure_buf.len - suffix.len;
+            @memcpy(self.last_failure_buf[keep..], suffix);
+            self.last_failure_len = self.last_failure_buf.len;
+        }
+    }
+
+    pub fn noteFailureIfEmpty(self: *Browser, comptime fmt: []const u8, args: anytype) void {
+        if (self.last_failure_len == 0) self.setFailure(fmt, args);
+    }
 
     // The Runtime serializes calls to one Store. This linear-memory guard also
     // fences reentry across Host calls and covers replacement of the owned socket.
@@ -212,6 +250,7 @@ pub const Browser = struct {
         self.tool_active = true;
         self.soft_timed_out = false;
         self.exchange_count = 0;
+        self.clearFailure();
         return true;
     }
 
@@ -239,13 +278,19 @@ pub const Browser = struct {
         const method: diagnostics.Method = .browser;
         while (true) {
             const clock = try scoped_io.budget(transport.context, self.handle());
-            if (clock.guest_ms == 0 or clock.transport_ms <= cleanup_egress_reserve_ms) return error.Timeout;
+            if (clock.guest_ms == 0 or clock.transport_ms <= cleanup_egress_reserve_ms) {
+                self.setFailure("scoped drain budget exhausted (guest_ms={d}, transport_ms={d}, reserve_ms={d})", .{ clock.guest_ms, clock.transport_ms, cleanup_egress_reserve_ms });
+                return error.Timeout;
+            }
             var arena = std.heap.ArenaAllocator.init(output);
             defer arena.deinit();
             const scratch = arena.allocator();
             const packet = switch (try scoped_io.pull(transport.context, scratch, self.handle(), max_text_bytes, 0)) {
                 .empty => break,
-                .closed => return error.Closed,
+                .closed => {
+                    self.setFailure("scoped transport stream closed during drain", .{});
+                    return error.Closed;
+                },
                 .message => |bytes| try scanPacket(transport, scratch, &budget, method, null, bytes),
             };
             switch (packet.envelope.kind) {
@@ -255,7 +300,10 @@ pub const Browser = struct {
                 },
                 .reply => |reply| {
                     // An older duplicate cannot be a new command's reply.
-                    if (reply.id >= self.next_command) return error.UnexpectedCdpResponse;
+                    if (reply.id >= self.next_command) {
+                        self.setFailure("unexpected CDP reply id={d} during drain (next_command={d})", .{ reply.id, self.next_command });
+                        return error.UnexpectedCdpResponse;
+                    }
                 },
             }
         }
@@ -386,15 +434,30 @@ pub const Browser = struct {
         const url = if (admitted.websocket()) requested else blk: {
             const discovery = try admitted.discoveryUrl(&url_buf);
             const response = try transport.httpGet(transport.context, scratch, discovery, max_discovery_bytes);
-            if (response.status != 200) return error.BadHttpStatus;
-            if (response.body.len > max_discovery_bytes) return error.Oversized;
+            if (response.status != 200) {
+                self.setFailure("HTTP GET {s} returned status {d} (expected 200)", .{ discovery, response.status });
+                return error.BadHttpStatus;
+            }
+            if (response.body.len > max_discovery_bytes) {
+                self.setFailure("HTTP GET {s} response body ({d} B) exceeds max discovery limit ({d} B)", .{ discovery, response.body.len, max_discovery_bytes });
+                return error.Oversized;
+            }
             var decode = DecodeBudget{};
             const json = parseJson(scratch, response.body, &decode) catch |err| switch (err) {
                 error.OutOfMemory, error.DecodeByteBudgetExceeded, error.DecodeTokenBudgetExceeded => return err,
-                else => return error.InvalidDiscovery,
+                else => {
+                    self.setFailure("GET {s} returned invalid discovery JSON ({s}, body len={d})", .{ discovery, @errorName(err), response.body.len });
+                    return error.InvalidDiscovery;
+                },
             };
-            const candidate = stringField(json, "webSocketDebuggerUrl") orelse return error.InvalidDiscovery;
-            try admitted.checkDiscovered(candidate);
+            const candidate = stringField(json, "webSocketDebuggerUrl") orelse {
+                self.setFailure("GET {s} discovery JSON omitted string field 'webSocketDebuggerUrl'", .{discovery});
+                return error.InvalidDiscovery;
+            };
+            admitted.checkDiscovered(candidate) catch |err| {
+                self.setFailure("discovery URL {s} returned disallowed debugger endpoint '{s}' ({s})", .{ discovery, candidate, @errorName(err) });
+                return err;
+            };
             break :blk candidate;
         };
 
@@ -404,6 +467,7 @@ pub const Browser = struct {
         const connection = try transport.open(transport.context, scratch, url);
         if (!validConnectionId(connection)) {
             transport.close(transport.context, connection) catch {};
+            self.setFailure("ws-open for {s} returned invalid connection handle '{s}'", .{ url, connection });
             return error.TransportFailure;
         }
         self.clearCapture();
@@ -414,7 +478,10 @@ pub const Browser = struct {
         errdefer if (self.state == .connected) self.invalidate(transport, .closed);
         var budget = MessageBudget{};
         const version = try self.command(transport, scratch, &budget, .version, null);
-        if (stringField(version, "protocolVersion") == null or stringField(version, "product") == null) return error.InvalidCdpMessage;
+        if (stringField(version, "protocolVersion") == null or stringField(version, "product") == null) {
+            self.setFailure("Browser.getVersion from {s} omitted protocolVersion or product", .{url});
+            return error.InvalidCdpMessage;
+        }
         if (self.soft_timed_out) return error.SettledTimeout;
     }
 
@@ -481,13 +548,17 @@ pub const Browser = struct {
     }
 
     pub fn newTab(self: *Browser, transport: Transport, scratch: Allocator, url: ?[]const u8) Error!NewTabReceipt {
-        if (url) |explicit| if (!validNavigationUrl(explicit)) return error.InvalidNavigationUrl;
+        if (url) |explicit| if (!validNavigationUrl(explicit)) {
+            self.setFailure("new_tab URL '{s}' must be an explicit http:// or https:// URL without credentials or backslash", .{explicit});
+            return error.InvalidNavigationUrl;
+        };
         var budget = MessageBudget{};
         const created = self.command(transport, scratch, &budget, .{ .create_tab = url orelse "about:blank" }, null) catch |err| switch (err) {
-            error.CdpRejected => return .{ .outcome = .tab_creation_rejected },
+            error.CdpRejected => return error.TabCreationRejected,
             else => return err,
         };
         const id = checkedId(created, "targetId") orelse {
+            self.setFailure("Target.createTarget reply omitted targetId", .{});
             self.invalidate(transport, .closed);
             return error.OutcomeUnknown;
         };
@@ -499,7 +570,7 @@ pub const Browser = struct {
         const target = try self.selectTarget(transport, scratch, &budget, ref);
         const page = self.pageRef(target.id);
         self.acknowledgeEffect(transport, scratch, &budget, .{ .activate_tab = target.id }, null) catch |err| switch (err) {
-            error.CdpRejected => return .{ .outcome = .tab_activation_rejected, .page_ref = page },
+            error.CdpRejected => return error.TabActivationRejected,
             else => return err,
         };
         return .{ .outcome = .tab_activation_requested, .page_ref = page };
@@ -513,13 +584,21 @@ pub const Browser = struct {
         // No atomic close-if-not-last command exists. Refuse when the current
         // target listing has no other ordinary page, and never close a browser,
         // window, browser context, or a privileged/prerendered target directly.
-        if (!target.ordinary() or ordinary_pages < 2) return .{ .outcome = .tab_close_blocked, .page_ref = page };
+        if (!target.ordinary()) {
+            self.setFailure("close_tab refused for page_ref {s} (targetId={s}, url='{s}', special={}): privileged, non-HTTP(S), or special targets cannot be closed", .{ page, target.id, target.url, target.special });
+            return error.TabCloseBlocked;
+        }
+        if (ordinary_pages < 2) {
+            self.setFailure("close_tab refused for page_ref {s} (targetId={s}, url='{s}'): only {d} ordinary page remains; refusing to close the last ordinary tab", .{ page, target.id, target.url, ordinary_pages });
+            return error.TabCloseBlocked;
+        }
         const reply = self.command(transport, scratch, &budget, .{ .close_tab = target.id }, null) catch |err| switch (err) {
-            error.CdpRejected => return .{ .outcome = .tab_close_rejected, .page_ref = page },
+            error.CdpRejected => return error.TabCloseRejected,
             else => return err,
         };
         const success = reply.object.get("success") orelse Value.null;
         if (success != .bool or !success.bool) {
+            self.setFailure("Target.closeTarget for page_ref {s} (targetId={s}) did not return success=true", .{ page, target.id });
             self.invalidate(transport, .closed);
             return error.OutcomeUnknown;
         }
@@ -585,7 +664,7 @@ pub const Browser = struct {
         const action: Action = switch (history_action) {
             .reload => blk: {
                 const tree = self.command(transport, scratch, budget, .frame_tree, session) catch |err| switch (err) {
-                    error.CdpRejected => return .history_navigation_rejected,
+                    error.CdpRejected => return error.HistoryNavigationRejected,
                     else => return err,
                 };
                 const root = objectField(tree, "frameTree") orelse return error.InvalidCdpMessage;
@@ -593,13 +672,16 @@ pub const Browser = struct {
                 const frame_id = checkedId(frame, "id") orelse return error.InvalidCdpMessage;
                 if (!std.mem.eql(u8, frame_id, target)) return error.InvalidCdpMessage;
                 const url = stringField(frame, "url") orelse return error.InvalidCdpMessage;
-                if (!allowedHistoryUrl(url)) return .history_navigation_rejected;
+                if (!allowedHistoryUrl(url)) {
+                    self.setFailure("reload rejected: current frame {s} has disallowed URL '{s}'", .{ frame_id, url });
+                    return error.HistoryNavigationRejected;
+                }
                 // Chrome discards reload if the selected document has since changed.
                 break :blk .{ .reload = checkedId(frame, "loaderId") orelse return error.InvalidCdpMessage };
             },
             .back, .forward => blk: {
                 const history = self.command(transport, scratch, budget, .navigation_history, session) catch |err| switch (err) {
-                    error.CdpRejected => return .history_navigation_rejected,
+                    error.CdpRejected => return error.HistoryNavigationRejected,
                     else => return err,
                 };
                 const entries = arrayField(history, "entries") orelse return error.InvalidCdpMessage;
@@ -610,7 +692,10 @@ pub const Browser = struct {
                 if (adjacent < 0 or adjacent >= entries.len) return .history_boundary;
                 const entry = entries[@intCast(adjacent)];
                 const url = stringField(entry, "url") orelse return error.InvalidCdpMessage;
-                if (!allowedHistoryUrl(url)) return .history_navigation_rejected;
+                if (!allowedHistoryUrl(url)) {
+                    self.setFailure("history_navigation {s} rejected: target entry URL '{s}' is not http://, https://, or about:blank", .{ @tagName(history_action), url });
+                    return error.HistoryNavigationRejected;
+                }
                 const id = try historyEntryId(entry);
                 for (entries, 0..) |other, index| {
                     if (index != adjacent and try historyEntryId(other) == id) return error.InvalidCdpMessage;
@@ -620,7 +705,7 @@ pub const Browser = struct {
             },
         };
         self.acknowledgeEffect(transport, scratch, budget, action, session) catch |err| switch (err) {
-            error.CdpRejected => return .history_navigation_rejected,
+            error.CdpRejected => return error.HistoryNavigationRejected,
             else => return err,
         };
         return .history_navigation_requested;
@@ -629,6 +714,7 @@ pub const Browser = struct {
     fn acknowledgeEffect(self: *Browser, transport: Transport, scratch: Allocator, budget: *MessageBudget, action: Action, session: ?[]const u8) Error!void {
         const reply = try self.command(transport, scratch, budget, action, session);
         if (reply.object.count() != 0) {
+            self.setFailure("CDP {s} returned unexpected non-empty reply ({d} fields)", .{ @tagName(action), reply.object.count() });
             self.invalidate(transport, .closed);
             return error.OutcomeUnknown;
         }
@@ -651,14 +737,25 @@ pub const Browser = struct {
         return self.pageOperation(transport, output, page, .{ .project = .{ .op = "key", .ref = element, .keyboard = input } });
     }
 
-    pub fn screenshot(self: *Browser, transport: Transport, scratch: Allocator, ref: []const u8, options: ScreenshotOptions) Error![]const u8 {
+    fn captureScreenshotReply(self: *Browser, transport: Transport, scratch: Allocator, ref: []const u8, options: ScreenshotOptions) Error!Value {
         try options.validate();
         var budget = MessageBudget{};
         const target = try self.selectTarget(transport, scratch, &budget, ref);
         const session = try self.attach(transport, scratch, &budget, target.id);
         const capture = self.captureAttached(transport, scratch, &budget, session, options);
         try self.detach(transport, scratch, &budget, session);
-        return decodeScreenshot(scratch, try capture);
+        return capture;
+    }
+
+    pub fn screenshot(self: *Browser, transport: Transport, scratch: Allocator, ref: []const u8, options: ScreenshotOptions) Error![]const u8 {
+        return decodeScreenshot(scratch, try self.captureScreenshotReply(transport, scratch, ref, options));
+    }
+
+    /// Validates Base64 JPEG framing (SOI, SOF dimensions, EOI) while keeping
+    /// the borrowed Base64 payload intact so callers do not decode and re-encode
+    /// full images inside WASM fuel limits.
+    pub fn screenshotCapture(self: *Browser, transport: Transport, scratch: Allocator, ref: []const u8, options: ScreenshotOptions) Error!ScreenshotCapture {
+        return validateScreenshotCapture(scratch, try self.captureScreenshotReply(transport, scratch, ref, options));
     }
 
     fn captureAttached(self: *Browser, transport: Transport, scratch: Allocator, budget: *MessageBudget, session: []const u8, options: ScreenshotOptions) Error!Value {
@@ -695,12 +792,19 @@ pub const Browser = struct {
                 selected = target;
             }
         }
-        return selected orelse error.StalePage;
+        return selected orelse {
+            self.setFailure("page_ref '{s}' was not found among {d} current page targets", .{ ref, pages.len });
+            return error.StalePage;
+        };
     }
 
     fn attach(self: *Browser, transport: Transport, scratch: Allocator, budget: *MessageBudget, target: []const u8) Error![]const u8 {
         const attached = self.command(transport, scratch, budget, .{ .attach = target }, null) catch |err| switch (err) {
-            error.CdpRejected => return error.StalePage,
+            error.CdpRejected => {
+                const detail = std.fmt.allocPrint(scratch, "Target.attachToTarget failed for targetId={s}: {s}", .{ target, self.lastFailure() }) catch null;
+                if (detail) |msg| self.setFailure("{s}", .{msg});
+                return error.StalePage;
+            },
             else => return err,
         };
         const session = checkedId(attached, "sessionId") orelse {
@@ -770,8 +874,15 @@ pub const Browser = struct {
         // Exceptions can echo the expression or page secrets; return only a
         // validated exception class name and 0-based line/column, never text or handles.
         if (reply.object.get("exceptionDetails")) |details| return safeScriptException(scratch, details);
-        const remote = objectField(reply, "result") orelse return error.OutcomeUnknown;
-        if (std.mem.eql(u8, stringField(remote, "type") orelse return error.OutcomeUnknown, "undefined")) return .{ .outcome = .undefined };
+        const remote = objectField(reply, "result") orelse {
+            self.setFailure("Runtime.evaluate reply missing object 'result' field", .{});
+            return error.OutcomeUnknown;
+        };
+        const result_type = stringField(remote, "type") orelse {
+            self.setFailure("Runtime.evaluate result missing string 'type' field", .{});
+            return error.OutcomeUnknown;
+        };
+        if (std.mem.eql(u8, result_type, "undefined")) return .{ .outcome = .undefined };
         const value = remote.object.get("value") orelse return .{ .outcome = .result_unavailable };
         const output = try scratch.alloc(u8, max_js_output_bytes);
         var stream = std.io.fixedBufferStream(output);
@@ -838,11 +949,14 @@ pub const Browser = struct {
     fn detach(self: *Browser, transport: Transport, scratch: Allocator, budget: *const MessageBudget, session: []const u8) Error!void {
         if (self.state != .connected) return;
         var cleanup = MessageBudget.cleanup(budget.attachment);
-        const reply = self.command(transport, scratch, &cleanup, .{ .detach = session }, null) catch {
+        const reply = self.command(transport, scratch, &cleanup, .{ .detach = session }, null) catch |err| {
+            const msg = std.fmt.allocPrint(scratch, "Target.detachFromTarget failed ({s}): {s}", .{ @errorName(err), self.lastFailure() }) catch null;
+            if (msg) |m| self.setFailure("{s}", .{m});
             self.invalidate(transport, .closed);
             return error.AttachmentCleanupFailed;
         };
         if (reply.object.count() != 0) {
+            self.setFailure("Target.detachFromTarget returned unexpected non-empty reply ({d} fields)", .{reply.object.count()});
             self.invalidate(transport, .closed);
             return error.AttachmentCleanupFailed;
         }
@@ -851,7 +965,10 @@ pub const Browser = struct {
     fn pageOperation(self: *Browser, transport: Transport, scratch: Allocator, ref: []const u8, operation: PageOperation) Error!Value {
         var budget = MessageBudget{};
         const target = try self.selectTarget(transport, scratch, &budget, ref);
-        if (operation == .navigate and !allowedHistoryUrl(target.url)) return singleton(scratch, "error", "navigation_rejected");
+        if (operation == .navigate and !allowedHistoryUrl(target.url)) {
+            self.setFailure("navigate rejected: selected tab {s} (targetId={s}) currently has non-navigable URL '{s}' (must be http://, https://, or about:blank)", .{ ref, target.id, target.url });
+            return error.NavigationRejected;
+        }
         const session = try self.attach(transport, scratch, &budget, target.id);
         const result = switch (operation) {
             .project => |query| self.project(transport, scratch, &budget, session, target.id, query),
@@ -861,16 +978,7 @@ pub const Browser = struct {
             if (operation == .navigate or (operation == .project and operation.project.effect())) return error.OutcomeUnknown;
             return err;
         };
-        // An acknowledged detach after a known semantic rejection is a
-        // settled application outcome. Return a typed observation/receipt;
-        // the host intentionally retires sockets for ambiguous guest failures.
-        return result catch |err| switch (err) {
-            error.StaleElementRef => singleton(scratch, "error", "stale_browser_ref"),
-            error.NotActionable => singleton(scratch, "error", "not_actionable"),
-            error.ProjectionUnavailable => singleton(scratch, "error", "observation_unavailable"),
-            error.NavigationRejected => singleton(scratch, "error", "navigation_rejected"),
-            else => err,
-        };
+        return result;
     }
 
     fn project(self: *Browser, transport: Transport, scratch: Allocator, budget: *MessageBudget, session: []const u8, frame_id: []const u8, query: ProjectQuery) Error!Value {
@@ -879,7 +987,11 @@ pub const Browser = struct {
         // closed rather than asking for an unbounded recursive frame tree.
         const world = try std.fmt.allocPrint(scratch, "microcrab-observe-{s}", .{self.handle()});
         const context = self.command(transport, scratch, budget, .{ .world = .{ .name = world, .frame = frame_id } }, session) catch |err| switch (err) {
-            error.CdpRejected => return error.ProjectionUnavailable,
+            error.CdpRejected => {
+                const detail = std.fmt.allocPrint(scratch, "Page.createIsolatedWorld '{s}' failed on frame {s}: {s}", .{ world, frame_id, self.lastFailure() }) catch null;
+                if (detail) |msg| self.setFailure("{s}", .{msg});
+                return error.ProjectionUnavailable;
+            },
             else => return err,
         };
         const context_id = jsonInteger(context.object.get("executionContextId") orelse return error.InvalidCdpMessage) orelse return error.InvalidCdpMessage;
@@ -892,18 +1004,37 @@ pub const Browser = struct {
         {
             defer budget.witness = null;
             _ = try self.command(transport, scratch, budget, .enable_runtime, session);
-            if (witness.unique == null) return error.ProjectionUnavailable;
+            if (witness.unique == null) {
+                self.setFailure("Runtime.enable did not report executionContextCreated uniqueId for isolated world '{s}' on frame {s} (executionContextId={d})", .{ world, frame_id, context_id });
+                return error.ProjectionUnavailable;
+            }
             _ = try self.command(transport, scratch, budget, .disable_runtime, session);
         }
-        const unique_id = witness.unique orelse return error.ProjectionUnavailable;
+        const unique_id = witness.unique orelse {
+            self.setFailure("isolated world '{s}' uniqueId lost after Runtime.disable on frame {s}", .{ world, frame_id });
+            return error.ProjectionUnavailable;
+        };
         const effect = query.effect();
         const reply = self.command(transport, scratch, budget, .{ .projection = .{ .query = query, .context = unique_id, .key = world } }, session) catch |err| {
             return if (effect) error.OutcomeUnknown else err;
         };
-        if (reply.object.contains("exceptionDetails")) return if (effect) error.OutcomeUnknown else error.ProjectionUnavailable;
+        if (reply.object.get("exceptionDetails")) |details| {
+            const detail_text = stringField(details, "text") orelse "script exception";
+            const exc_obj = objectField(details, "exception");
+            const exc_desc = if (exc_obj) |e| stringField(e, "description") orelse stringField(e, "className") else null;
+            const line_num = if (details == .object) jsonInteger(details.object.get("lineNumber") orelse .null) else null;
+            self.setFailure("isolated-world {s} threw exception ({s}; line={d}): {s}", .{ query.op, detail_text, line_num orelse -1, exc_desc orelse "no description" });
+            return if (effect) error.OutcomeUnknown else error.ProjectionUnavailable;
+        }
         const outer = objectField(reply, "result") orelse return if (effect) error.OutcomeUnknown else error.InvalidCdpMessage;
         const data = objectField(outer, "value") orelse return if (effect) error.OutcomeUnknown else error.InvalidCdpMessage;
         if (stringField(data, "error")) |err| {
+            const detail = stringField(data, "detail") orelse "";
+            if (detail.len > 0) {
+                self.setFailure("{s} reported '{s}': {s}", .{ query.op, err, detail });
+            } else {
+                self.setFailure("{s} reported '{s}'", .{ query.op, err });
+            }
             if (std.mem.eql(u8, err, "stale_ref")) return error.StaleElementRef;
             if (std.mem.eql(u8, err, "not_actionable")) return error.NotActionable;
             if (query.scoped_input != null and std.mem.eql(u8, err, "unavailable")) return error.ProjectionUnavailable;
@@ -931,14 +1062,28 @@ pub const Browser = struct {
 
     fn navigateAttached(self: *Browser, transport: Transport, scratch: Allocator, budget: *MessageBudget, session: []const u8, url: []const u8) Error!Value {
         const reply = self.command(transport, scratch, budget, .{ .navigate = url }, session) catch |err| switch (err) {
-            error.CdpRejected => return error.NavigationRejected,
+            error.CdpRejected => {
+                const detail = std.fmt.allocPrint(scratch, "Page.navigate to '{s}' rejected by CDP: {s}", .{ url, self.lastFailure() }) catch null;
+                if (detail) |msg| self.setFailure("{s}", .{msg});
+                return error.NavigationRejected;
+            },
             else => return error.OutcomeUnknown,
         };
-        if (reply.object.contains("errorText")) return error.NavigationRejected;
-        if (reply.object.get("isDownload")) |download| {
-            if (download != .bool or download.bool) return error.OutcomeUnknown;
+        if (reply.object.get("errorText")) |err_val| {
+            const err_text = if (err_val == .string) err_val.string else "non-string errorText";
+            self.setFailure("Page.navigate to '{s}' failed with errorText: {s}", .{ url, err_text });
+            return error.NavigationRejected;
         }
-        if (checkedId(reply, "frameId") == null) return error.OutcomeUnknown;
+        if (reply.object.get("isDownload")) |download| {
+            if (download != .bool or download.bool) {
+                self.setFailure("Page.navigate to '{s}' resulted in a file download or non-boolean isDownload", .{url});
+                return error.OutcomeUnknown;
+            }
+        }
+        if (checkedId(reply, "frameId") == null) {
+            self.setFailure("Page.navigate to '{s}' reply omitted frameId", .{url});
+            return error.OutcomeUnknown;
+        }
         return singleton(scratch, "outcome", "navigation_requested");
     }
 
@@ -1101,7 +1246,16 @@ pub const Browser = struct {
         return self.exchange(transport, scratch, budget, id, message, session, action) catch |err| {
             if (err == error.CdpRejected or err == error.WebMcpUnsupported or err == error.JsExecutionTimedOut or err == error.JsOutputLimit) return err;
             self.invalidate(transport, if (err == error.Stale) .stale else .closed);
-            return if (action.tabEffect()) error.OutcomeUnknown else err;
+            if (action.tabEffect()) {
+                if (self.lastFailure().len == 0) {
+                    self.setFailure("CDP {s} (id={d}) failed before confirmed reply: {s}", .{ @tagName(action), id, @errorName(err) });
+                } else if (std.fmt.allocPrint(scratch, "CDP {s} (id={d}) failed ({s}): {s}", .{ @tagName(action), id, @errorName(err), self.lastFailure() })) |msg| {
+                    self.setFailure("{s}", .{msg});
+                } else |_| {}
+                return error.OutcomeUnknown;
+            }
+            self.noteFailureIfEmpty("CDP {s} (id={d}) failed: {s}", .{ @tagName(action), id, @errorName(err) });
+            return err;
         };
     }
 
@@ -1157,6 +1311,7 @@ pub const Browser = struct {
                             failure(transport, .decode, method, .confirmed, error.InvalidCdpMessage);
                             return error.InvalidCdpMessage;
                         };
+                        self.setFailure("CDP {s} rejected (code={d}): {s}", .{ @tagName(action), code, reason });
                         failure(transport, .dispatch, method, .confirmed, error.CdpRejected);
                         if (action == .evaluate and code == -32000 and std.mem.eql(u8, reason, "Execution was terminated")) return error.JsExecutionTimedOut;
                         if (action == .web_mcp) {
@@ -1207,7 +1362,10 @@ pub const Browser = struct {
         const scoped_io = transport.scoped orelse return transport.receive(transport.context, scratch, self.handle(), max_text_bytes);
         while (true) {
             const clock = try scoped_io.budget(transport.context, self.handle());
-            if (clock.guest_ms == 0 or clock.transport_ms <= cleanup_egress_reserve_ms) return error.Timeout;
+            if (clock.guest_ms == 0 or clock.transport_ms <= cleanup_egress_reserve_ms) {
+                self.setFailure("scoped receive budget exhausted before reply (guest_ms={d}, transport_ms={d}, reserve_ms={d}, cleaning={any})", .{ clock.guest_ms, clock.transport_ms, cleanup_egress_reserve_ms, budget.cleaning });
+                return error.Timeout;
+            }
             if (!budget.cleaning and clock.transport_ms <= cleanup_reserve_ms) self.soft_timed_out = true;
             const floor: u32 = if (budget.cleaning or self.soft_timed_out) cleanup_egress_reserve_ms else cleanup_reserve_ms;
             switch (try scoped_io.pull(transport.context, scratch, self.handle(), max_text_bytes, @min(soft_pull_max_ms, clock.transport_ms - floor))) {
@@ -1221,7 +1379,10 @@ pub const Browser = struct {
                     return bytes;
                 },
                 .empty => continue,
-                .closed => return error.Closed,
+                .closed => {
+                    self.setFailure("scoped transport stream closed while waiting for CDP reply", .{});
+                    return error.Closed;
+                },
             }
         }
     }
@@ -2081,6 +2242,117 @@ fn decodeScreenshot(alloc: Allocator, result: Value) Error![]const u8 {
     decoder.decode(jpeg, data) catch return error.InvalidScreenshot;
     if (!std.mem.startsWith(u8, jpeg, "\xff\xd8") or !std.mem.endsWith(u8, jpeg, "\xff\xd9")) return error.InvalidScreenshot;
     return jpeg;
+}
+
+const base64_alphabet = blk: {
+    var table = [_]bool{false} ** 256;
+    for ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") |c| table[c] = true;
+    break :blk table;
+};
+
+fn validBase64Body(body: []const u8) bool {
+    var i: usize = 0;
+    while (i + 4 <= body.len) : (i += 4) {
+        if (!base64_alphabet[body[i]] or
+            !base64_alphabet[body[i + 1]] or
+            !base64_alphabet[body[i + 2]] or
+            !base64_alphabet[body[i + 3]]) return false;
+    }
+    while (i < body.len) : (i += 1) {
+        if (!base64_alphabet[body[i]]) return false;
+    }
+    return true;
+}
+
+const HeaderParse = union(enum) {
+    dimensions: JpegDimensions,
+    need_more,
+    invalid,
+};
+
+fn parseJpegDimensionsBounded(jpeg: []const u8) HeaderParse {
+    if (jpeg.len < 2) return .need_more;
+    if (!std.mem.startsWith(u8, jpeg, "\xff\xd8")) return .invalid;
+    var offset: usize = 2;
+    while (offset < jpeg.len) {
+        if (jpeg[offset] != 0xff) return .invalid;
+        while (offset < jpeg.len and jpeg[offset] == 0xff) offset += 1;
+        if (jpeg.len - offset < 3) return .need_more;
+        const marker = jpeg[offset];
+        offset += 1;
+        if (marker == 0xda or marker == 0xd9 or marker == 0) return .invalid;
+        const length = std.mem.readInt(u16, jpeg[offset..][0..2], .big);
+        if (length < 2) return .invalid;
+        if (length > jpeg.len - offset) return .need_more;
+        switch (marker) {
+            0xc0...0xc3, 0xc5...0xc7, 0xc9...0xcb, 0xcd...0xcf => {
+                if (length < 8) return .invalid;
+                const height = std.mem.readInt(u16, jpeg[offset + 3 ..][0..2], .big);
+                const width = std.mem.readInt(u16, jpeg[offset + 5 ..][0..2], .big);
+                if (width == 0 or height == 0) return .invalid;
+                return .{ .dimensions = .{ .width = width, .height = height } };
+            },
+            else => offset += length,
+        }
+    }
+    return .need_more;
+}
+
+pub fn jpegDimensions(jpeg: []const u8) ?JpegDimensions {
+    return switch (parseJpegDimensionsBounded(jpeg)) {
+        .dimensions => |dims| dims,
+        .need_more, .invalid => null,
+    };
+}
+
+/// Validates a borrowed Base64 JPEG string without decoding or re-encoding the
+/// full payload: checks bounds, Base64 body characters + EOI tail (`\xff\xd9`),
+/// and incrementally decodes only the JPEG header prefix needed to find SOF.
+fn validateScreenshotCapture(alloc: Allocator, result: Value) Error!ScreenshotCapture {
+    const data = stringField(result, "data") orelse return error.InvalidScreenshot;
+    const decoder = std.base64.standard.Decoder;
+    const length = decoder.calcSizeForSlice(data) catch return error.InvalidScreenshot;
+    if (length > max_jpeg_bytes) return error.ScreenshotTooLarge;
+    if (length < 4 or data.len < 8) return error.InvalidScreenshot;
+
+    const tail_start = data.len - 8;
+    const tail_len = decoder.calcSizeForSlice(data[tail_start..]) catch return error.InvalidScreenshot;
+    var tail_buf: [6]u8 = undefined;
+    decoder.decode(tail_buf[0..tail_len], data[tail_start..]) catch return error.InvalidScreenshot;
+    if (!std.mem.endsWith(u8, tail_buf[0..tail_len], "\xff\xd9")) return error.InvalidScreenshot;
+
+    if (!validBase64Body(data[0..tail_start])) return error.InvalidScreenshot;
+
+    const prefix_b64: usize = @min(data.len, 4096);
+    var decoded = try alloc.alloc(u8, decoder.calcSizeForSlice(data[0..prefix_b64]) catch return error.InvalidScreenshot);
+    defer alloc.free(decoded);
+    decoder.decode(decoded, data[0..prefix_b64]) catch return error.InvalidScreenshot;
+
+    var decoded_len = decoded.len;
+    var prev_b64: usize = prefix_b64;
+    while (true) {
+        switch (parseJpegDimensionsBounded(decoded[0..decoded_len])) {
+            .dimensions => |dims| return .{
+                .base64 = data,
+                .bytes = length,
+                .width = dims.width,
+                .height = dims.height,
+            },
+            .invalid => return error.InvalidScreenshot,
+            .need_more => {
+                if (prev_b64 >= data.len) return error.InvalidScreenshot;
+                const next_b64 = @min(data.len, prev_b64 * 2);
+                const extra_len = decoder.calcSizeForSlice(data[prev_b64..next_b64]) catch return error.InvalidScreenshot;
+                const grown = try alloc.alloc(u8, decoded_len + extra_len);
+                @memcpy(grown[0..decoded_len], decoded[0..decoded_len]);
+                alloc.free(decoded);
+                decoded = grown;
+                decoder.decode(decoded[decoded_len .. decoded_len + extra_len], data[prev_b64..next_b64]) catch return error.InvalidScreenshot;
+                decoded_len += extra_len;
+                prev_b64 = next_b64;
+            },
+        }
+    }
 }
 
 pub fn parseWebMcpArguments(alloc: Allocator, bytes: []const u8) DecodeError!Value {

@@ -58,6 +58,10 @@ pub const CommunicationError = struct {
     code: enum { absent, unavailable, rejected, cancelled },
     message: []const u8,
 };
+pub const SessionError = struct {
+    code: enum { absent, unavailable, denied, invalid_argument, limit, cancelled, script_error },
+    message: []const u8,
+};
 
 pub const Visibility = enum { visible, invisible, secret };
 pub const Persistence = enum { persisted, ephemeral };

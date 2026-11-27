@@ -4,8 +4,7 @@ world browser {
   include microcrab:agent/agent@0.9.0;
   import microcrab:host/web-transport@0.1.0;
   import microcrab:host/web-transport-scoped@0.1.1;
-  import microcrab:session/variables@0.2.0;
-  import microcrab:session/references@0.3.0;
+  import microcrab:session/session@0.4.0;
   import microcrab:session/observation@0.2.2;
 }
 

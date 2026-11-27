@@ -15,7 +15,7 @@ check() {
 }
 # The independent Zig world adds Session services to the Rust Coding base.
 # Compare the shared interfaces without treating guest-owned world selection as canonical.
-check crates/session/wit/scoped-variables.wit wit/deps/session-scoped/scoped-variables.wit
+check crates/session/wit/session.wit wit/deps/session-api/session.wit
 check crates/session/wit/file-versions.wit wit/deps/session-scoped/file-versions.wit
 check crates/agent/wit/wit/agent.wit wit/deps/agent/agent.wit
 check crates/host/wit/host.wit wit/deps/host/host.wit

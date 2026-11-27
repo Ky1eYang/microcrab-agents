@@ -59,7 +59,7 @@ function response(at, size, alignment, tag = 0) {
 }
 function mock(interfaceName, name, fn) {
     const [namespace, nameOfInterface] = interfaceName.includes('/') ? interfaceName.split('/') : ['host', interfaceName];
-    const version = { agent: '0.9.0', host: '0.1.0', session: '0.2.0' }[namespace];
+    const version = interfaceName === 'session/session' ? '0.4.0' : { agent: '0.9.0', host: '0.1.0', session: '0.2.0' }[namespace];
     const key = `microcrab:${namespace}/${nameOfInterface}@${version}`;
     (imports[key] ??= {})[name] = fn;
 }
@@ -306,71 +306,47 @@ mock('process', 'release', (id, tag, pid, at) => {
     response(at, 16, 4);
 });
 
-const session = 'session/variables';
-mock(session, 'tool-call-facts', at => {
-    const phase = factsCount++ % 3;
-    if (phase === 2) {
-        const out = response(at, 40, 8, 1);
-        put8(out, 1);
-        writeList(out + 4, 'not admitted');
+const session = 'session/session';
+mock(session, 'eval', (scriptPtr, scriptLen, argsTag, argsPtr, argsLen, at) => {
+    const script = stringAt(scriptPtr, scriptLen);
+    if (script === 'vars::call_facts()') {
+        assert.equal(argsTag, 0);
+        const phase = factsCount++ % 3;
+        if (phase === 2) {
+            opError(at, 1, 'not admitted');
+            return;
+        }
+        const modeJson = phase === 0 ? '"plan"' : 'null';
+        const tsJson = phase === 0 ? 0xfedcba9876543210n.toString() : '1';
+        writeList(
+            response(at, 16, 4),
+            `{"session_id":"session-exact-🦀","admitted_mode":${modeJson},"observed_at_unix_ms":${tsJson}}`,
+        );
         return;
     }
-    const out = response(at, 40, 8);
-    writeList(out, 'session-exact-🦀');
-    put8(out + 8, phase === 0 ? 1 : 0);
-    if (phase === 0) writeList(out + 12, 'plan');
-    put64(out + 24, phase === 0 ? 0xfedcba9876543210n : 1n);
-});
-mock(session, 'variable-get', (ptr, len, at) => {
-    const name = stringAt(ptr, len);
-    if (name === 'null-value') writeList(response(at, 16, 4), 'null');
-    else {
-        assert.equal(name, 'missing');
-        opError(at, 0, 'not found');
+    if (script === 'vars::get("null-value")') {
+        assert.equal(argsTag, 0);
+        writeList(response(at, 16, 4), 'null');
+        return;
     }
-});
-mock(session, 'variable-get-all', at => {
-    const list = listArea(response(at, 16, 4), 16, 2, 4);
-    writeList(list, 'value-🦀');
-    writeList(list + 8, '[false,{},null]');
-    writeList(list + 16, 'other');
-    writeList(list + 24, 'true');
-});
-mock(session, 'variable-metadata', at => {
-    const list = listArea(response(at, 16, 4), 20, 2, 4);
-    writeList(list, 'value-🦀');
-    put8(list + 8, 1); // invisible
-    put8(list + 9, 0); // persisted
-    put8(list + 10, 1); // client owner
-    writeList(list + 12, Uint8Array.of(0, 2)); // runtime, agent
-    writeList(list + 20, 'secret');
-    put8(list + 28, 2); // secret
-    put8(list + 29, 1); // ephemeral
-    put8(list + 30, 1); // client owner
-    writeList(list + 32, Uint8Array.of());
-});
-mock(session, 'variable-change', (set, sets, remove, removes, scoped, scopes, at) => {
-    if (sets === 0) {
-        assert.deepEqual([set, sets, remove, removes, scoped, scopes], [0, 0, 0, 0, 0, 0]);
+    if (script === 'vars::get("missing")') {
+        assert.equal(argsTag, 0);
+        opError(at, 0, 'not found');
+        return;
+    }
+    if (script === 'args.value') {
+        assert.equal(argsTag, 1);
+        const parsed = JSON.parse(stringAt(argsPtr, argsLen));
+        writeList(response(at, 16, 4), JSON.stringify(parsed.value));
+        return;
+    }
+    if (script === 'vars::set("blocked", true)') {
+        assert.equal(argsTag, 1);
+        assert.deepEqual(JSON.parse(stringAt(argsPtr, argsLen)), { blocked: true });
         opError(at, 2, 'fixture rejection');
         return;
     }
-    assert.deepEqual([sets, removes, scopes], [2, 2, 3]);
-    assert.deepEqual([set % 4, remove % 4, scoped % 4], [0, 0, 0]);
-    assert.deepEqual([getText(set), getText(set + 8), getText(set + 16), getText(set + 24)], ['plain', '{"a":1}', 'bool', 'false']);
-    assert.deepEqual([getText(remove), getText(remove + 8)], ['gone', 'gone-🦀']);
-    const entries = [
-        ['keep-editors', 'null', 1, 1, 0],
-        ['clear-editors', '[]', 0, 0, 1],
-        ['new-editors', '42', 1, 0, 1],
-    ];
-    for (const [i, expected] of entries.entries()) {
-        const row = scoped + i * 32;
-        assert.deepEqual([getText(row), getText(row + 8), get8(row + 16), get8(row + 17), get8(row + 20)], expected);
-    }
-    assert.deepEqual([get32(scoped + 56), get32(scoped + 60)], [0, 0]); // Some([])
-    assert.deepEqual([...bytes(get32(scoped + 88), get32(scoped + 92))], [1, 0, 2]);
-    response(at, 16, 4);
+    assert.fail(`unexpected eval probe script: ${script}`);
 });
 
 const module = new WebAssembly.Module(readFileSync(process.argv[2]));
@@ -484,7 +460,7 @@ console.log('Coding ABI: 128 rounds including typed Session imports, and 4096-en
 const guest = new WebAssembly.Module(readFileSync(process.argv[3]));
 const guestImports = {};
 const ignore = 'microcrab:host/glob-ignore@0.1.0';
-const scoped = 'microcrab:session/variables@0.2.0';
+const sessionNs = 'microcrab:session/session@0.4.0';
 const hostInfo = 'microcrab:agent/host-info@0.9.0';
 const agentExecution = 'microcrab:agent/execution@0.9.0';
 for (const { module: namespace, name } of WebAssembly.Module.imports(guest)) {
@@ -492,6 +468,8 @@ for (const { module: namespace, name } of WebAssembly.Module.imports(guest)) {
     assert.notEqual(namespace, 'microcrab:host/text-read@0.1.0');
     assert.notEqual(namespace, 'microcrab:host/text-write@0.1.0');
     assert.notEqual(namespace, 'microcrab:host/file-mutation@0.1.0');
+    assert.notEqual(namespace, 'microcrab:session/variables@0.2.0');
+    assert.notEqual(namespace, 'microcrab:session/references@0.3.0');
     (guestImports[namespace] ??= {})[name] = () => assert.fail(`unexpected production import ${namespace}/${name}`);
 }
 const hostJson = JSON.stringify({ os_family: 'unix', os: 'linux', arch: 'x86_64', shell: 'bash',
@@ -499,10 +477,13 @@ const hostJson = JSON.stringify({ os_family: 'unix', os: 'linux', arch: 'x86_64'
 let snapshotReply;
 let changeRejected = false;
 let published;
+let mountedDocs;
 let snapshotCalls = 0;
+let initDocGlobs = 0;
 let stateGlobCalls = 0;
 let dropCalls = 0;
 assert.deepEqual(Object.keys(guestImports[ignore]).sort(), ['glob-ignored-paths', 'glob-with-ignored-paths']);
+assert.deepEqual(Object.keys(guestImports[sessionNs]).sort(), ['eval']);
 Object.assign(guestImports[ignore], {
     'glob-ignored-paths'(at) {
         snapshotCalls++;
@@ -517,9 +498,38 @@ Object.assign(guestImports[ignore], {
         }
     },
     'glob-with-ignored-paths'(root, rootLen, pattern, patternLen, hidden, ignored, directories, max, paths, count, at) {
+        const patternStr = stringAt(pattern, patternLen);
+        if (patternStr === '**/AGENTS.md') {
+            initDocGlobs++;
+            assert.equal(stringAt(root, rootLen), '.');
+            assert.deepEqual([hidden, ignored, directories, max], [0, 0, 0, 256n]);
+            const passed = Array.from({ length: count }, (_, i) => getText(paths + 8 * i));
+            assert.deepEqual(passed, snapshotReply);
+            const out = response(at, 32, 4);
+            const found = count > 0
+                ? [
+                    { path: 'nested/AGENTS.md', kind: 0 },
+                    { path: 'dir/AGENTS.md', kind: 1 },
+                    { path: 'AGENTS.md', kind: 0 },
+                ]
+                : [];
+            if (found.length === 0) {
+                put32(out, 0);
+                put32(out + 4, 0);
+            } else {
+                const list = listArea(out, 12, found.length, 4);
+                found.forEach((item, i) => {
+                    writeList(list + 12 * i, item.path);
+                    put8(list + 12 * i + 8, item.kind);
+                });
+            }
+            put8(out + 8, 0);
+            put8(out + 12, 0);
+            return;
+        }
         stateGlobCalls++;
         assert.equal(stringAt(root, rootLen), 'root');
-        assert.equal(stringAt(pattern, patternLen), '*');
+        assert.equal(patternStr, '*');
         assert.deepEqual([hidden, ignored, directories, max], [0, 0, 0, 7n]);
         if (count) assert.deepEqual(Array.from({ length: count }, (_, i) => getText(paths + 8 * i)), ['nested/', 'other.txt']);
         const out = response(at, 32, 4);
@@ -534,14 +544,16 @@ Object.assign(guestImports[ignore], {
         }
     },
 });
-guestImports[scoped]['variable-change'] = (set, sets, remove, removes, entries, count, at) => {
-    assert.deepEqual([set, sets, remove, removes, count], [0, 0, 0, 0, 1]);
-    assert.equal(getText(entries), 'glob_ignored');
-    assert.deepEqual([get8(entries + 16), get8(entries + 17), get8(entries + 20)], [0, 0, 1]);
-    assert.deepEqual([...bytes(get32(entries + 24), get32(entries + 28))], [1]); // Client editor
+guestImports[sessionNs].eval = (scriptPtr, scriptLen, argsTag, argsPtr, argsLen, at) => {
+    const script = stringAt(scriptPtr, scriptLen);
+    assert.match(script, /vars::set_scoped\("glob_ignored", args\.glob_ignored, "visible", "persisted", \["client"\]\)/);
+    assert.match(script, /refs::mount_host\(args\.agent_docs\)/);
+    assert.equal(argsTag, 1);
+    const parsed = JSON.parse(stringAt(argsPtr, argsLen));
     if (changeRejected) return opError(at, 2, 'fixture refusal');
-    published = getText(entries + 8);
-    response(at, 16, 4);
+    published = JSON.stringify(parsed.glob_ignored);
+    mountedDocs = parsed.agent_docs;
+    writeList(response(at, 16, 4), 'null');
 };
 guestImports[hostInfo]['host-info'] = at => writeList(response(at, 16, 4), hostJson);
 guestImports[agentExecution].create = (channels, count, at) => {
@@ -556,25 +568,27 @@ guestImports[agentExecution]['[resource-drop]buffer'] = id => {
 const coding = new WebAssembly.Instance(guest, guestImports).exports;
 ({ memory, cabi_realloc: realloc } = coding);
 
-for (const [reply, expected] of [
-    [['nested/', 'other.txt'], '["nested/","other.txt"]'],
-    [[], '[]'],
-    [4, '{"status":"incomplete","reason":"limit"}'],
-    [2, '{"status":"unavailable","reason":"unsupported"}'],
+for (const [reply, expected, expectedDocs] of [
+    [['nested/', 'other.txt'], '["nested/","other.txt"]', ['AGENTS.md', 'nested/AGENTS.md']],
+    [[], '[]', []],
+    [4, '{"status":"incomplete","reason":"limit"}', []],
+    [2, '{"status":"unavailable","reason":"unsupported"}', []],
 ]) {
     snapshotReply = reply;
     const result = coding.init();
     assert.equal(get8(result), 0);
     assert.equal(published, expected);
+    assert.deepEqual(mountedDocs, expectedDocs);
     coding.cabi_post_init(result);
 }
 changeRejected = true;
 let result = coding.init();
 assert.equal(get8(result), 1);
-assert.equal(getText(result + 4), 'rejected');
+assert.equal(getText(result + 4), 'denied');
 assert.equal(getText(result + 12), 'could not publish glob_ignored: fixture refusal');
 coding.cabi_post_init(result);
 assert.equal(snapshotCalls, 5);
+assert.equal(initDocGlobs, 2);
 
 function glob(ignoredList) {
     return coding.invoke(...alloc(hostJson), ...alloc('glob'), ...alloc(JSON.stringify({

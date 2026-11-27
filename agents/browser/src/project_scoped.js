@@ -34,11 +34,11 @@
   }
   if (op === 'scroll') {
     const target = doc.scrollingElement;
-    if (!target) return {error:'not_actionable'};
+    if (!target) return {error:'not_actionable', detail: 'document has no scrollingElement'};
     target.scrollBy({left:args.x, top:args.y, behavior:'instant'});
     return {outcome:'scroll_requested'};
   }
-  if (!current()) return {error:'stale_ref'};
+  if (!current()) return {error:'stale_ref', detail: `no active snapshot for current URL (${doc.URL}); run snapshot again`};
   if (op === 'find') {
     const entry = ref ? find(ref) : null;
     if (ref && (!entry || entry.kind !== 'find' || entry.input !== input ||

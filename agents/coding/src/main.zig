@@ -12,30 +12,65 @@ comptime {
     abi.exportAgent(@This());
 }
 
+const GlobIgnoredValue = union(enum) {
+    paths: []const []const u8,
+    unavailable: struct { status: []const u8, reason: []const u8 },
+
+    pub fn jsonStringify(self: @This(), jws: anytype) !void {
+        switch (self) {
+            .paths => |list| try jws.write(list),
+            .unavailable => |status| try jws.write(status),
+        }
+    }
+};
+
+const init_script = @embedFile("scripts/init.rhai");
+
+fn discoverAgentDocs(scratch: Allocator, ignored_paths: []const []const u8) []const []const u8 {
+    const resolved = switch (abi.host.glob_ignore.globWithIgnoredPaths(scratch, .{
+        .root = ".",
+        .pattern = "**/AGENTS.md",
+        .include_hidden = false,
+        .include_ignored = false,
+        .include_directories = false,
+        .max_results = 256,
+    }, ignored_paths)) {
+        .ok => |output| output,
+        .err => return &.{},
+    };
+    var docs = std.ArrayListUnmanaged([]const u8){};
+    for (resolved.entries) |entry| {
+        if (entry.kind == .file) docs.append(scratch, entry.path) catch return &.{};
+    }
+    std.mem.sort([]const u8, docs.items, {}, struct {
+        fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.less);
+    return docs.items;
+}
+
 pub fn init(scratch: Allocator) types.InitResult {
-    const encoded = switch (abi.host.glob_ignore.globIgnoredPaths(scratch)) {
-        .ok => |paths| std.json.stringifyAlloc(scratch, paths, .{}),
-        .err => |failure| std.json.stringifyAlloc(scratch, .{
+    var agent_docs: []const []const u8 = &.{};
+    const glob_ignored: GlobIgnoredValue = switch (abi.host.glob_ignore.globIgnoredPaths(scratch)) {
+        .ok => |paths| blk: {
+            agent_docs = discoverAgentDocs(scratch, paths);
+            break :blk .{ .paths = paths };
+        },
+        .err => |failure| .{ .unavailable = .{
             .status = if (failure.code == .limit) "incomplete" else "unavailable",
             // An operation message can contain host paths or other private details.
             .reason = @tagName(failure.code),
-        }, .{}),
+        } },
     };
-    const value = encoded catch |err| return .{ .failed = .{
+    const args_json = std.json.stringifyAlloc(scratch, .{
+        .glob_ignored = glob_ignored,
+        .agent_docs = agent_docs,
+    }, .{}) catch |err| return .{ .failed = .{
         .code = "glob_ignored_encode_failed",
         .message = @errorName(err),
     } };
-    return switch (abi.session.variableChange(scratch, .{
-        .set = &.{},
-        .remove = &.{},
-        .scoped_set = &.{.{
-            .name = "glob_ignored",
-            .value_json = value,
-            .visibility = .visible,
-            .persistence = .persisted,
-            .editors = &.{.client},
-        }},
-    })) {
+    return switch (abi.session.eval(scratch, init_script, args_json)) {
         .ok => .{ .ready = {} },
         .err => |failure| .{ .failed = .{
             .code = @tagName(failure.code),
@@ -92,8 +127,13 @@ pub fn invoke(scratch: Allocator, supplied: []const u8, name: []const u8, argume
     }
     const multi_patch = eq(u8, name, "apply_patch");
     const facts: ?types.CallFacts = if (text.needsToolCallFacts(name))
-        switch (abi.session.toolCallFacts(scratch)) {
-            .ok => |value| value,
+        switch (abi.session.eval(scratch, "vars::call_facts()", null)) {
+            .ok => |payload| std.json.parseFromSliceLeaky(types.CallFacts, scratch, payload, .{ .ignore_unknown_fields = true }) catch |err| return .{ .err = .{
+                .kind = .failed,
+                .code = "failed",
+                .message = std.fmt.allocPrint(scratch, "invalid session call facts: {s}", .{@errorName(err)}) catch "invalid session call facts",
+                .retryable = false,
+            } },
             .err => |failure| return .{ .err = .{
                 .kind = if (failure.code == .cancelled) .cancelled else .failed,
                 .code = @tagName(failure.code),

@@ -158,7 +158,7 @@ JSON; skipping a payload does not replenish raw allowances.
   invoke browser/OS shortcuts; the page may ignore the events. If the target
   moves or disappears after keydown, do not assume keyup ran or replay the call.
 - `screenshot(page_ref, title?, clip?, scale?, quality?)` captures a JPEG into
-  the user's Personal Content Library via `microcrab:session/references@0.3.0` and
+  the user's Personal Content Library via `microcrab:session/session@0.4.0` and
   mounts its reference (`ref_...`) in the current Session. With no framing
   options it uses the original viewport capture. JPEG `quality` is an integer
   from `0` to `100` (default `55`), and changing it alone preserves the original

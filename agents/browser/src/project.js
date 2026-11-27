@@ -8,7 +8,9 @@ function (key, op, ref, input) {
   const regular = doc.location.protocol === 'http:' || doc.location.protocol === 'https:';
   const blank = doc.URL === 'about:blank';
   const observeOnly = blank || doc.URL.startsWith('chrome://inspect/');
-  if (globalThis !== top || !root || (!regular && !(op === 'scan' && observeOnly) && !(op === 'wait_for' && blank))) return {error:'unavailable'};
+  if (globalThis !== top || !root || (!regular && !(op === 'scan' && observeOnly) && !(op === 'wait_for' && blank))) {
+    return {error:'unavailable', detail: `unsupported page/frame context: top=${globalThis === top}, hasRoot=${Boolean(root)}, op=${op}, url=${doc.URL}`};
+  }
   let state = globalThis[key];
   const current = () => state && state.root === doc.documentElement && state.url === doc.URL;
   // A fresh overview invalidates older references. Find can start without a
@@ -100,20 +102,20 @@ function (key, op, ref, input) {
       !node.matches(':disabled') && node.checkVisibility({checkOpacity:true, checkVisibilityCSS:true});
   }
   // Legacy projection and effects.
-  if (!current()) return {error:'stale_ref'};
+  if (!current()) return {error:'stale_ref', detail: `no active snapshot for current URL (${doc.URL}); run snapshot again`};
   if (op !== 'scan') {
     const entry = find(ref);
-    if (!entry || entry.kind !== 'node' || !live(entry.node)) return {error:'stale_ref'};
+    if (!entry || entry.kind !== 'node' || !live(entry.node)) return {error:'stale_ref', detail: `element ref '${ref}' missing or detached from document`};
     const el = entry.node;
     const r = role(el);
-    if (el.parentElement !== entry.parent || r !== entry.role || label(el) !== entry.label) return {error:'stale_ref'};
-    if (!interactive(r) || !available(el)) return {error:'not_actionable'};
+    if (el.parentElement !== entry.parent || r !== entry.role || label(el) !== entry.label) return {error:'stale_ref', detail: `element ref '${ref}' changed parent, role, or label since snapshot`};
+    if (!interactive(r) || !available(el)) return {error:'not_actionable', detail: `element role '${r}' is non-interactive, hidden, disabled, or inert`};
     // Reject before dispatch if the same node was relabelled, moved, or no
     // longer denotes the action shown in the observation.
     const a = el.closest('a[href]');
-    if (a && (a.hasAttribute('download') || !/^https?:$/.test(a.protocol) || a.target && a.target !== '_self')) return {error:'not_actionable'};
+    if (a && (a.hasAttribute('download') || !/^https?:$/.test(a.protocol) || a.target && a.target !== '_self')) return {error:'not_actionable', detail: `link target '${a.target || ''}' or protocol '${a.protocol}' or download attribute is unsupported`};
     if (op === 'click') {
-      if (el.localName === 'input' && el.type === 'file') return {error:'not_actionable'};
+      if (el.localName === 'input' && el.type === 'file') return {error:'not_actionable', detail: 'cannot click file input elements'};
       el.click();
       return {outcome:'click_dispatched'};
     }
@@ -130,7 +132,7 @@ function (key, op, ref, input) {
       return {outcome:'keys_dispatched'};
     }
     if (op === 'type') {
-      if (!textAllowed(el) || el.readOnly || el.closest('[aria-readonly="true"]')) return {error:'not_actionable'};
+      if (!textAllowed(el) || el.readOnly || el.closest('[aria-readonly="true"]')) return {error:'not_actionable', detail: 'element is not a writable text input or is readonly'};
       // Do not call focus: it can run page code before the intended write.
       const proto = el.localName === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const decoded = new TextDecoder('utf-8', {fatal:true}).decode(Uint8Array.from(atob(input), c => c.charCodeAt(0)));
@@ -139,13 +141,13 @@ function (key, op, ref, input) {
       el.dispatchEvent(new InputEvent('input', {bubbles:true, composed:true, inputType:'insertReplacementText'}));
       return {outcome: live(el) && field.get.call(el) === decoded ? 'text_replaced' : 'input_dispatched_unconfirmed'};
     }
-    return {error:'unavailable'};
+    return {error:'unavailable', detail: `unsupported legacy projection op '${op}'`};
   }
   const entry = ref ? find(ref) : null;
-  if (ref && (!entry || !['node','cursor'].includes(entry.kind) || !live(entry.node) || !live(entry.boundary || entry.node))) return {error:'stale_ref'};
+  if (ref && (!entry || !['node','cursor'].includes(entry.kind) || !live(entry.node) || !live(entry.boundary || entry.node))) return {error:'stale_ref', detail: `region/continuation ref '${ref}' missing or detached`};
   const boundary = entry?.boundary || entry?.node || root;
   let node = entry?.node || root;
-  if (!boundary.contains(node) || (entry?.kind === 'node' && (role(node) !== entry.role || label(node) !== entry.label))) return {error:'stale_ref'};
+  if (!boundary.contains(node) || (entry?.kind === 'node' && (role(node) !== entry.role || label(node) !== entry.label))) return {error:'stale_ref', detail: `region ref '${ref}' out of boundary or element mutated`};
   const rows = [];
   let visited=0;
   let transitions=0;

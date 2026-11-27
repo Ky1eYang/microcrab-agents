@@ -53,8 +53,7 @@ fn recordCheckpoint(_: *anyopaque, event: observation.Checkpoint) void {
 
 const host_info_module = "microcrab:agent/host-info@0.9.0";
 const execution_module = "microcrab:agent/execution@0.9.0";
-const variables_module = "microcrab:session/variables@0.2.0";
-const references_module = "microcrab:session/references@0.3.0";
+const session_module = "microcrab:session/session@0.4.0";
 const transport_module = "microcrab:host/web-transport@0.1.0";
 const scoped_transport_module = "microcrab:host/web-transport-scoped@0.1.1";
 
@@ -109,14 +108,17 @@ export fn invoke(info_at: u32, info_len: u32, name_at: u32, name_len: u32, args_
     switch (guest.invoke(&browser, transport, createReference, a, memory.allocator, ready, mode, name, args)) {
         .ok => |text| {
             if (std.mem.eql(u8, name, "connect")) {
-                if (startConnectionJob(a, browser.handle())) |buffer| {
-                    wire[4] = 1; // tool-output::buffered
-                    std.mem.writeInt(u32, wire[8..12], buffer, .little);
-                    wire[12] = 1; // include-initial
-                } else {
-                    browser.retire(transport) catch {};
-                    wire[0] = 1;
-                    lowerFailure(wire[4..], .{ .code = "connection_job_failed", .message = "Unable to start the connection Job." });
+                switch (startConnectionJob(a, browser.handle())) {
+                    .ok => |buffer| {
+                        wire[4] = 1; // tool-output::buffered
+                        std.mem.writeInt(u32, wire[8..12], buffer, .little);
+                        wire[12] = 1; // include-initial
+                    },
+                    .err => |msg| {
+                        browser.retire(transport) catch {};
+                        wire[0] = 1;
+                        lowerFailure(wire[4..], .{ .code = "connection_job_failed", .message = msg });
+                    },
                 }
             } else if (std.mem.eql(u8, name, "execute_js") and text.len > observation.max_js_inline_output_bytes) {
                 if (startBufferedOutput(text)) |buffer| {
@@ -196,28 +198,43 @@ fn dropBuffer(buffer: u32) void {
     import(fn (u32) callconv(.C) void, execution_module, "[resource-drop]buffer")(buffer);
 }
 
+fn executionFailureReason(alloc: Allocator, wire: []const u8) ?[]const u8 {
+    if (wire[0] == 0) return null;
+    defer releaseFailure(wire[4..]);
+    const code = wireText(wire[8..]);
+    const message = wireText(wire[16..]);
+    if (message.len > 0 and code.len > 0) {
+        return std.fmt.allocPrint(alloc, "Unable to start the connection Job ({s}): {s}", .{ code, message }) catch "Unable to start the connection Job.";
+    }
+    if (message.len > 0) return alloc.dupe(u8, message) catch "Unable to start the connection Job.";
+    if (code.len > 0) return std.fmt.allocPrint(alloc, "Unable to start the connection Job ({s}).", .{code}) catch "Unable to start the connection Job.";
+    return "Unable to start the connection Job.";
+}
+
 fn acceptedExecution(wire: []const u8) bool {
     if (wire[0] == 0) return true;
     releaseFailure(wire[4..]);
     return false;
 }
 
-fn startConnectionJob(alloc: Allocator, id: []const u8) ?u32 {
-    const initial = std.json.stringifyAlloc(alloc, .{ .status = "connected", .connect_id = id }, .{}) catch return null;
+const ConnectionJobResult = union(enum) { ok: u32, err: []const u8 };
+
+fn startConnectionJob(alloc: Allocator, id: []const u8) ConnectionJobResult {
+    const initial = std.json.stringifyAlloc(alloc, .{ .status = "connected", .connect_id = id }, .{}) catch |err| return .{ .err = @errorName(err) };
     var out: [28]u8 align(4) = undefined;
     import(fn (u32, u32, u32) callconv(.C) void, execution_module, "create")(0, 0, ptr(&out));
-    if (!acceptedExecution(&out)) return null;
+    if (executionFailureReason(alloc, &out)) |msg| return .{ .err = msg };
     const buffer = std.mem.readInt(u32, out[4..8], .little);
     if (!appendJob(buffer, initial)) {
         dropBuffer(buffer);
-        return null;
+        return .{ .err = "Unable to append initial connection payload to execution Job." };
     }
     import(fn (u32, u32, u32, u32) callconv(.C) void, execution_module, "attach-guest")(buffer, ptr(id), id.len, ptr(&out));
-    if (!acceptedExecution(&out)) {
+    if (executionFailureReason(alloc, &out)) |msg| {
         dropBuffer(buffer);
-        return null;
+        return .{ .err = msg };
     }
-    return buffer;
+    return .{ .ok = buffer };
 }
 
 fn startBufferedOutput(text: []const u8) ?u32 {
@@ -281,59 +298,89 @@ fn compatible(a: Allocator, supplied: []const u8) !bool {
     return catalog.compatible(a, supplied, imported);
 }
 
-fn admittedMode() ?[]const u8 {
-    // memory32 result<call-facts, communication-error>: 8-aligned payload.
-    // In the success payload the Session string is at 0 and its mode option
-    // starts at 8 (string at 12); the timestamp at 24 needs no cleanup.
-    var out: [40]u8 align(8) = undefined;
-    import(fn (u32) callconv(.C) void, variables_module, "tool-call-facts")(ptr(&out));
+const CallFactsMode = struct {
+    admitted_mode: ?[]const u8 = null,
+};
+
+const EvalResult = union(enum) {
+    ok: []u8,
+    err: struct { code: u8, message: []u8 },
+};
+
+fn sessionEval(script: []const u8, args_json: ?[]const u8) EvalResult {
+    var out: [16]u8 align(4) = undefined;
+    const args_tag: u32 = if (args_json != null) 1 else 0;
+    const args_bytes = args_json orelse "";
+    import(fn (u32, u32, u32, u32, u32, u32) callconv(.C) void, session_module, "eval")(
+        ptr(script),
+        script.len,
+        args_tag,
+        ptr(args_bytes),
+        args_bytes.len,
+        ptr(&out),
+    );
     switch (out[0]) {
-        0 => {
-            defer releaseText(out[8..]); // Session ID is not needed by Browser.
-            return switch (out[16]) {
-                0 => null,
-                1 => blk: {
-                    const mode = wireText(out[20..]);
-                    defer release(mode, 1);
-                    const known = std.meta.stringToEnum(catalog.Mode, mode) orelse break :blk null;
-                    break :blk @tagName(known);
-                },
-                else => @trap(),
-            };
-        },
-        1 => {
-            releaseText(out[12..]); // communication-error message; never exposed.
-            return null;
-        },
+        0 => return .{ .ok = wireText(out[4..]) },
+        1 => return .{ .err = .{ .code = out[4], .message = wireText(out[8..]) } },
         else => @trap(),
     }
 }
 
-fn createReference(alloc: Allocator, title: []const u8, media_type: []const u8, jpeg: []const u8) guest.ReferenceResult {
-    // result<string, string>: discriminant at 0, string at 4 (memory32).
-    var out: [12]u8 align(4) = undefined;
-    import(fn (u32, u32, u32, u32, u32, u32, u32) callconv(.C) void, references_module, "create")(
-        ptr(title),
-        title.len,
-        ptr(media_type),
-        media_type.len,
-        ptr(jpeg),
-        jpeg.len,
-        ptr(&out),
-    );
-    return switch (out[0]) {
-        0 => ok: {
-            const raw = wireText(out[4..]);
-            defer release(raw, 1);
-            const copy = alloc.dupe(u8, raw) catch return .{ .err = "Out of memory storing reference ID." };
-            break :ok .{ .ok = copy };
+fn admittedMode() ?[]const u8 {
+    const raw = switch (sessionEval("vars::call_facts()", null)) {
+        .ok => |bytes| bytes,
+        .err => |failure| {
+            release(failure.message, 1);
+            return null;
         },
-        1 => rejected: {
-            releaseText(out[4..]); // Never expose an unchecked Runtime message.
-            break :rejected .{ .err = "Reference rejected." };
-        },
-        else => @trap(),
     };
+    defer release(raw, 1);
+    const parsed = std.json.parseFromSlice(CallFactsMode, memory.allocator, raw, .{
+        .ignore_unknown_fields = true,
+    }) catch return null;
+    defer parsed.deinit();
+    const mode = parsed.value.admitted_mode orelse return null;
+    const known = std.meta.stringToEnum(catalog.Mode, mode) orelse return null;
+    return @tagName(known);
+}
+
+fn createReference(alloc: Allocator, title: []const u8, media_type: []const u8, b64: []const u8) guest.ReferenceResult {
+    // Only JSON-escape title/media_type; b64 has already been validated as strict
+    // standard Base64 ASCII, avoiding both encode/decode and 150 KB JSON escaping in WASM.
+    const header = std.json.stringifyAlloc(alloc, .{
+        .title = title,
+        .media_type = media_type,
+    }, .{}) catch return .{ .err = "Out of memory encoding reference request." };
+    defer alloc.free(header);
+    const field = ",\"data\":\"";
+    const suffix = "\"}";
+    const prefix = header[0 .. header.len - 1];
+    const args_json = alloc.alloc(u8, prefix.len + field.len + b64.len + suffix.len) catch return .{ .err = "Out of memory encoding reference request." };
+    defer alloc.free(args_json);
+    var pos: usize = 0;
+    @memcpy(args_json[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+    @memcpy(args_json[pos .. pos + field.len], field);
+    pos += field.len;
+    @memcpy(args_json[pos .. pos + b64.len], b64);
+    pos += b64.len;
+    @memcpy(args_json[pos .. pos + suffix.len], suffix);
+
+    const raw = switch (sessionEval("refs::create_base64(args.title, args.media_type, args.data)", args_json)) {
+        .ok => |bytes| bytes,
+        .err => |failure| {
+            defer release(failure.message, 1);
+            const msg = std.fmt.allocPrint(alloc, "refs::create_base64 failed (code={d}): {s}", .{ failure.code, failure.message }) catch "refs::create_base64 failed.";
+            return .{ .err = msg };
+        },
+    };
+    defer release(raw, 1);
+
+    const id = std.json.parseFromSliceLeaky([]const u8, alloc, raw, .{}) catch |err| {
+        const msg = std.fmt.allocPrint(alloc, "refs::create_base64 returned invalid JSON id ({s}): {s}", .{ @errorName(err), raw }) catch "refs::create_base64 returned invalid JSON id.";
+        return .{ .err = msg };
+    };
+    return .{ .ok = id };
 }
 
 const TE = observation.TransportError;

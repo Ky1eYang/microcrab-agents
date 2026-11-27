@@ -168,47 +168,31 @@ fn runBulk(scratch: Scratch, path: []const u8) types.InvokeResult {
 
 fn runSession(scratch: Scratch) types.InvokeResult {
     const session = abi.session;
-    const facts = verify(session.toolCallFacts(scratch));
+    const facts_json = verify(session.eval(scratch, "vars::call_facts()", null));
+    const facts = std.json.parseFromSliceLeaky(types.CallFacts, scratch, facts_json, .{ .ignore_unknown_fields = true }) catch @trap();
     check(std.mem.eql(u8, facts.session_id, "session-exact-🦀"));
     check(std.mem.eql(u8, facts.admitted_mode.?, "plan"));
     check(facts.observed_at_unix_ms == 0xfedc_ba98_7654_3210);
-    const unselected = verify(session.toolCallFacts(scratch));
+
+    const unselected_json = verify(session.eval(scratch, "vars::call_facts()", null));
+    const unselected = std.json.parseFromSliceLeaky(types.CallFacts, scratch, unselected_json, .{ .ignore_unknown_fields = true }) catch @trap();
     check(unselected.admitted_mode == null and unselected.observed_at_unix_ms == 1);
-    switch (session.toolCallFacts(scratch)) {
+    switch (session.eval(scratch, "vars::call_facts()", null)) {
         .ok => @trap(),
         .err => |failure| check(failure.code == .unavailable and std.mem.eql(u8, failure.message, "not admitted")),
     }
 
-    const single = verify(session.variableGet(scratch, "null-value"));
+    const single = verify(session.eval(scratch, "vars::get(\"null-value\")", null));
     check(std.mem.eql(u8, single, "null"));
-    switch (session.variableGet(scratch, "missing")) {
+    switch (session.eval(scratch, "vars::get(\"missing\")", null)) {
         .ok => @trap(),
         .err => |failure| check(failure.code == .absent and std.mem.eql(u8, failure.message, "not found")),
     }
-    const values = verify(session.variableGetAll(scratch));
-    check(values.len == 2);
-    check(std.mem.eql(u8, values[0].name, "value-🦀") and std.mem.eql(u8, values[0].value_json, "[false,{},null]"));
-    check(std.mem.eql(u8, values[1].name, "other") and std.mem.eql(u8, values[1].value_json, "true"));
-    const meta = verify(session.variableMetadata(scratch));
-    check(meta.len == 2);
-    check(std.mem.eql(u8, meta[0].name, "value-🦀") and meta[0].visibility == .invisible);
-    check(meta[0].persistence == .persisted and meta[0].owner == .client);
-    check(std.mem.eql(types.Role, meta[0].editors, &.{ .runtime, .agent }));
-    check(std.mem.eql(u8, meta[1].name, "secret") and meta[1].visibility == .secret);
-    check(meta[1].persistence == .ephemeral and meta[1].owner == .client and meta[1].editors.len == 0);
-
-    verify(session.variableChange(scratch, .{
-        .set = &.{ .{ .name = "plain", .value_json = "{\"a\":1}" }, .{ .name = "bool", .value_json = "false" } },
-        .remove = &.{ "gone", "gone-🦀" },
-        .scoped_set = &.{
-            .{ .name = "keep-editors", .value_json = "null", .visibility = .invisible, .persistence = .ephemeral, .editors = null },
-            .{ .name = "clear-editors", .value_json = "[]", .visibility = .visible, .persistence = .persisted, .editors = &.{} },
-            .{ .name = "new-editors", .value_json = "42", .visibility = .invisible, .persistence = .persisted, .editors = &.{ .client, .runtime, .agent } },
-        },
-    }));
-    switch (session.variableChange(scratch, .{ .set = &.{}, .remove = &.{}, .scoped_set = &.{} })) {
+    const echoed = verify(session.eval(scratch, "args.value", "{\"value\":\"val-🦀\"}"));
+    check(std.mem.eql(u8, echoed, "\"val-🦀\""));
+    switch (session.eval(scratch, "vars::set(\"blocked\", true)", "{\"blocked\":true}")) {
         .ok => @trap(),
-        .err => |failure| check(failure.code == .rejected and std.mem.eql(u8, failure.message, "fixture rejection")),
+        .err => |failure| check(failure.code == .denied and std.mem.eql(u8, failure.message, "fixture rejection")),
     }
     // The first result must still own its lifted string after later allocations.
     return .{ .ok = .{ .final = .{ .content = facts.session_id } } };

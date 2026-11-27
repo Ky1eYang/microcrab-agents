@@ -755,3 +755,89 @@ test "WebMCP skips foreign payloads and handles active lifecycle while idle" {
         }
     }
 }
+
+test "screenshotCapture validates large JPEGs with extended headers without full decode and rejects malformed data" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Put SOF0 past 4 KB via APP0 + large APP2 segment, with 80 KB payload before EOI.
+    const ext_len: usize = 4000;
+    var jpeg = std.ArrayList(u8).init(a);
+    try jpeg.appendSlice("\xff\xd8\xff\xe2");
+    var len_buf: [2]u8 = undefined;
+    std.mem.writeInt(u16, &len_buf, ext_len + 2, .big);
+    try jpeg.appendSlice(&len_buf);
+    try jpeg.appendNTimes(0x41, ext_len);
+    // SOF0: 600x300
+    try jpeg.appendSlice("\xff\xc0\x00\x08\x08\x01\x2c\x02\x58\x03");
+    try jpeg.appendNTimes(0x00, 76 * 1024);
+    try jpeg.appendSlice("\xff\xd9");
+
+    const image = std.base64.standard.Encoder.encode(try a.alloc(u8, std.base64.standard.Encoder.calcSize(jpeg.items.len)), jpeg.items);
+    const capture = try std.fmt.allocPrint(a, "{{\"id\":5,\"sessionId\":\"session\",\"result\":{{\"data\":\"{s}\"}}}}", .{image});
+    const capture_cmd = "{\"id\":5,\"method\":\"Page.captureScreenshot\",\"sessionId\":\"session\",\"params\":{\"format\":\"jpeg\",\"quality\":55,\"fromSurface\":true,\"captureBeyondViewport\":false}}";
+    var self = browser.Browser{};
+    var mock = Mock{
+        .frames = &.{ version, pages2, pages3, attach, capture, detach },
+        .sends = &.{ version_cmd, list_cmd, revalidate_cmd, attach_cmd, capture_cmd, detach_cmd },
+    };
+    try self.connect(mock.transport(), a, ws);
+    const ref = (try self.listPages(mock.transport(), a)).pages[0].ref;
+    const got = try self.screenshotCapture(mock.transport(), a, &ref, .{});
+    try t.expectEqualStrings(image, got.base64);
+    try t.expectEqual(jpeg.items.len, got.bytes);
+    try t.expectEqual(@as(u16, 600), got.width);
+    try t.expectEqual(@as(u16, 300), got.height);
+
+    // Corrupt a middle Base64 character while keeping SOI/SOF/EOI intact -> must reject.
+    var bad_image = try a.dupe(u8, image);
+    bad_image[image.len / 2] = '!';
+    const bad_capture_id9 = try std.fmt.allocPrint(a, "{{\"id\":9,\"sessionId\":\"session\",\"result\":{{\"data\":\"{s}\"}}}}", .{bad_image});
+    mock.sent = 0;
+    mock.reads = 0;
+    mock.sends = &.{
+        "{\"id\":7,\"method\":\"Target.getTargets\"}",
+        "{\"id\":8,\"method\":\"Target.attachToTarget\",\"params\":{\"targetId\":\"p1\",\"flatten\":true}}",
+        "{\"id\":9,\"method\":\"Page.captureScreenshot\",\"sessionId\":\"session\",\"params\":{\"format\":\"jpeg\",\"quality\":55,\"fromSurface\":true,\"captureBeyondViewport\":false}}",
+        "{\"id\":10,\"method\":\"Target.detachFromTarget\",\"params\":{\"sessionId\":\"session\"}}",
+    };
+    mock.frames = &.{
+        "{\"id\":7," ++ pages_payload ++ "}",
+        "{\"id\":8,\"result\":{\"sessionId\":\"session\"}}",
+        bad_capture_id9,
+        "{\"id\":10,\"result\":{}}",
+    };
+    try t.expectError(error.InvalidScreenshot, self.screenshotCapture(mock.transport(), a, &ref, .{}));
+}
+
+test "executeJs missing result fields populates lastFailure for OutcomeUnknown" {
+    const loader = "loader-1";
+    const frame_tree_cmd = "{\"id\":5,\"method\":\"Page.getFrameTree\",\"sessionId\":\"session\"}";
+    const frame_tree_reply = "{\"id\":5,\"sessionId\":\"session\",\"result\":{\"frameTree\":{\"frame\":{\"id\":\"p1\",\"loaderId\":\"" ++ loader ++ "\",\"url\":\"https://fixture.test/\"}}}}";
+    const eval_bad_reply = "{\"id\":9,\"sessionId\":\"session\",\"result\":{\"result\":{}}}";
+    const enable_cmd = "{\"id\":6,\"method\":\"Runtime.enable\",\"sessionId\":\"session\"}";
+    const enable_reply = "{\"id\":6,\"sessionId\":\"session\",\"result\":{}}";
+    const ctx_event = "{\"method\":\"Runtime.executionContextCreated\",\"sessionId\":\"session\",\"params\":{\"context\":{\"id\":1,\"name\":\"\",\"uniqueId\":\"ctx-u1\",\"origin\":\"https://fixture.test\",\"auxData\":{\"isDefault\":true,\"type\":\"default\",\"frameId\":\"p1\"}}}}";
+    const disable_cmd = "{\"id\":7,\"method\":\"Runtime.disable\",\"sessionId\":\"session\"}";
+    const disable_reply = "{\"id\":7,\"sessionId\":\"session\",\"result\":{}}";
+    const frame_tree2_cmd = "{\"id\":8,\"method\":\"Page.getFrameTree\",\"sessionId\":\"session\"}";
+    const frame_tree2_reply = "{\"id\":8,\"sessionId\":\"session\",\"result\":{\"frameTree\":{\"frame\":{\"id\":\"p1\",\"loaderId\":\"" ++ loader ++ "\",\"url\":\"https://fixture.test/\"}}}}";
+    const eval_cmd = "{\"id\":9,\"method\":\"Runtime.evaluate\",\"sessionId\":\"session\",\"params\":{\"expression\":\"1+1\",\"uniqueContextId\":\"ctx-u1\",\"timeout\":1000,\"returnByValue\":true,\"generatePreview\":false,\"includeCommandLineAPI\":false,\"awaitPromise\":false,\"allowUnsafeEvalBlockedByCSP\":false,\"disableBreaks\":true,\"silent\":true}}";
+    const detach11_cmd = "{\"id\":10,\"method\":\"Target.detachFromTarget\",\"params\":{\"sessionId\":\"session\"}}";
+    const detach11_reply = "{\"id\":10,\"result\":{}}";
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var self = browser.Browser{};
+    var mock = Mock{
+        .frames = &.{ version, pages2, pages3, attach, frame_tree_reply, ctx_event, enable_reply, disable_reply, frame_tree2_reply, eval_bad_reply, detach11_reply },
+        .sends = &.{ version_cmd, list_cmd, revalidate_cmd, attach_cmd, frame_tree_cmd, enable_cmd, disable_cmd, frame_tree2_cmd, eval_cmd, detach11_cmd },
+    };
+    try self.connect(mock.transport(), a, ws);
+    const ref = (try self.listPages(mock.transport(), a)).pages[0].ref;
+    _ = self.acquireTool();
+    defer self.releaseTool();
+    try t.expectError(error.OutcomeUnknown, self.executeJs(mock.transport(), a, .{ .page_ref = &ref, .expression = "1+1", .world = .main, .timeout_ms = 1000 }));
+    try t.expect(std.mem.indexOf(u8, self.lastFailure(), "missing string 'type' field") != null);
+}

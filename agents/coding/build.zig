@@ -112,7 +112,7 @@ fn addWitTree(b: *std.Build, check: ?*std.Build.Step, world: []const u8) std.Bui
     for ([_][]const u8{
         "deps/agent/agent.wit",
         "deps/host/host.wit",
-        "deps/session-scoped/scoped-variables.wit",
+        "deps/session-api/session.wit",
         "deps/session-scoped/file-versions.wit",
     }) |file| {
         _ = wit.addCopyFile(b.path(b.fmt("wit/{s}", .{file})), file);
